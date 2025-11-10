@@ -1,0 +1,1337 @@
+/**
+ * FreePBX Voice Assistant with ARI Integration
+ * Supports both web interface and phone calls via Asterisk ARI
+ * Version 2.0 - Full RTP Audio Support
+ * CORRECTED VERSION - Fixed critical bugs
+ */
+
+import Fastify from 'fastify';
+import WebSocket from 'ws';
+import dotenv from 'dotenv';
+import fastifyFormBody from '@fastify/formbody';
+import fastifyWs from '@fastify/websocket';
+import fetch from 'node-fetch';
+import dgram from 'dgram';
+import { EventEmitter } from 'events';
+import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
+import ariClient from 'ari-client';
+
+// Import ARI and audio handlers
+import { ARIHandler } from './ari-handler.js';
+import { RTPHandler } from './rtp-handler.js';
+import * as audioUtils from './audio-utils.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load environment variables
+// Use an explicit path to be safe
+dotenv.config({ path: path.resolve(__dirname, '.env') });
+
+const {
+    OPENAI_API_KEY,
+    FREEPBX_HOST,
+    SIP_EXTENSION,
+    SIP_PASSWORD,
+    SERVER_HOST,
+    SERVER_PORT = 3000,
+    WEBHOOK_URL,
+    MAKE_WEBHOOK_URL,
+    // ARI Configuration
+    ARI_HOST,
+    ARI_PORT = 8088,
+    ARI_USERNAME,
+    ARI_PASSWORD,
+    ARI_APP_NAME = 'voiceassistant',
+    // RTP Configuration
+    RTP_HOST = '0.0.0.0', // Default to 0.0.0.0
+    RTP_PORT = 10000
+} = process.env;
+
+// --- NEW DIAGNOSTIC LOG ---
+console.log('============================================================');
+console.log('   STARTUP DIAGNOSTICS - .env check');
+console.log(`   Service Working Directory: ${process.cwd()}`);
+console.log(`   Loading .env from: ${path.resolve(__dirname, '.env')}`);
+console.log(`   process.env.SERVER_HOST: ${process.env.SERVER_HOST}`);
+console.log(`   process.env.RTP_HOST: ${process.env.RTP_HOST}`);
+console.log(`   process.env.ARI_HOST: ${process.env.ARI_HOST}`);
+console.log('============================================================');
+// --- END DIAGNOSTIC LOG ---
+
+
+// Validation
+if (!OPENAI_API_KEY) {
+    console.error('❌ Missing OPENAI_API_KEY in .env file');
+    process.exit(1);
+}
+if (!SERVER_HOST) {
+    console.error('❌ Missing SERVER_HOST in .env file. This is required for ARI to advertise the correct RTP address.');
+    // Note: We'll let the app start, but ARI handler will log a fatal error.
+}
+
+
+// Initialize Fastify
+const fastify = Fastify({
+    logger: true
+});
+fastify.register(fastifyFormBody);
+fastify.register(fastifyWs);
+
+// System configuration
+const SYSTEM_MESSAGE = `You are Sophie, an AI assistant for Mindenhurts Garage. You are helpful, friendly, and professional. You can:
+
+1. Answer questions about automotive services
+2. Help with roadside assistance and towing
+3. Schedule appointments
+4. Provide company information
+5. Transfer calls to a human team member when requested or when the issue is beyond your capabilities
+
+Keep responses conversational and concise for voice interaction. Always be polite and helpful.
+
+If a caller asks to speak with a human, wants to talk to someone, or if you encounter a situation you cannot handle, use the transfer_to_human function to connect them with a team member.`;
+
+const VOICE = 'alloy';
+const LOG_EVENT_TYPES = [
+    'error',
+    'response.content.done',
+    'rate_limits.updated',
+    'response.done',
+    'input_audio_buffer.committed',
+    'input_audio_buffer.speech_stopped',
+    'input_audio_buffer.speech_started',
+    'session.created',
+    'response.audio.delta',
+    'response.audio.done'
+];
+
+// Tools/Functions available to the AI
+const TOOLS = [
+    {
+        type: 'function',
+        name: 'get_automotive_info',
+        description: 'Get information about automotive services, pricing, or availability',
+        parameters: {
+            type: 'object',
+            properties: {
+                service_type: {
+                    type: 'string',
+                    description: 'Type of service: towing, repair, maintenance, inspection'
+                },
+                question: {
+                    type: 'string',
+                    description: 'Specific question about the service'
+                }
+            },
+            required: ['service_type']
+        }
+    },
+    {
+        type: 'function',
+        name: 'schedule_appointment',
+        description: 'Schedule an appointment for automotive service',
+        parameters: {
+            type: 'object',
+            properties: {
+                service_type: {
+                    type: 'string',
+                    description: 'Type of service needed'
+                },
+                preferred_date: {
+                    type: 'string',
+                    description: 'Preferred date in YYYY-MM-DD format'
+                },
+                preferred_time: {
+                    type: 'string',
+                    description: 'Preferred time in HH:MM format'
+                },
+                customer_name: {
+                    type: 'string',
+                    description: 'Customer name'
+                },
+                customer_phone: {
+                    type: 'string',
+                    description: 'Customer phone number'
+                },
+                notes: {
+                    type: 'string',
+                    description: 'Additional notes'
+                }
+            },
+            required: ['service_type', 'customer_phone']
+        }
+    },
+    {
+        type: 'function',
+        name: 'request_towing',
+        description: 'Request emergency towing service',
+        parameters: {
+            type: 'object',
+            properties: {
+                location: {
+                    type: 'string',
+                    description: 'Current location or address'
+                },
+                destination: {
+                    type: 'string',
+                    description: 'Destination address if known'
+                },
+                vehicle_type: {
+                    type: 'string',
+                    description: 'Type of vehicle'
+                },
+                urgency: {
+                    type: 'string',
+                    enum: ['normal', 'urgent', 'emergency'],
+                    description: 'Urgency level'
+                },
+                customer_phone: {
+                    type: 'string',
+                    description: 'Customer phone number'
+                }
+            },
+            required: ['location', 'customer_phone']
+        }
+    },
+    {
+        type: 'function',
+        name: 'transfer_to_human',
+        description: 'Transfer the call to a human agent when the caller requests to speak to a person or needs assistance beyond the AI capabilities',
+        parameters: {
+            type: 'object',
+            properties: {
+                reason: {
+                    type: 'string',
+                    description: 'Reason for transfer (e.g., complex issue, customer preference, technical question)'
+                },
+                extension: {
+                    type: 'string',
+                    description: 'Extension to transfer to (default: 7021)',
+                    default: '7021'
+                }
+            },
+            required: ['reason']
+        }
+    },
+    {
+        type: 'function',
+        name: 'request_callback',
+        description: 'Log a callback request when the customer wants to be called back by a team member',
+        parameters: {
+            type: 'object',
+            properties: {
+                customer_phone: {
+                    type: 'string',
+                    description: 'Customer phone number for callback'
+                },
+                customer_name: {
+                    type: 'string',
+                    description: 'Customer name if provided'
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Reason for callback request'
+                },
+                preferred_time: {
+                    type: 'string',
+                    description: 'Preferred callback time if specified'
+                }
+            },
+            required: ['customer_phone', 'reason']
+        }
+    }
+];
+
+// Global state
+let sipClient = null;
+let ariHandler = null;
+let rtpHandler = null;
+
+console.log('🚀 Starting FreePBX Voice Assistant with ARI Integration...');
+console.log('📋 Configuration:');
+console.log('   OpenAI API:', OPENAI_API_KEY ? '✅ Configured' : '❌ Missing');
+console.log('   FreePBX:', FREEPBX_HOST || 'Not configured');
+console.log('   SIP Extension:', SIP_EXTENSION || 'Not configured');
+console.log('   ARI:', ARI_HOST ? `${ARI_HOST}:${ARI_PORT}` : '❌ Not configured');
+console.log(`   RTP Listen (RTP_HOST): ${RTP_HOST}:${RTP_PORT}`);
+console.log(`   RTP Advertise (SERVER_HOST): ${SERVER_HOST}:${RTP_PORT}`);
+console.log(`   Server: ${SERVER_HOST || 'localhost'}:${SERVER_PORT}`);
+
+// ============================================================
+// SIP Client (for registration status monitoring)
+// ============================================================
+
+class FreePBXSIPClient extends EventEmitter {
+    constructor(options) {
+        super();
+        this.options = options;
+        this.socket = null;
+        this.registered = false;
+        this.callSequence = 1000;
+        this.callId = this.generateCallId();
+        this.branch = this.generateBranch();
+        this.tag = this.generateTag();
+        this.registrationInterval = null;
+    }
+
+    generateCallId() {
+        return Math.random().toString(36).substring(2, 15) + '@' + this.options.host;
+    }
+
+    generateBranch() {
+        return 'z9hG4bK' + Math.random().toString(36).substring(2, 15);
+    }
+
+    generateTag() {
+        return Math.random().toString(36).substring(2, 15);
+    }
+
+    start() {
+        return new Promise((resolve, reject) => {
+            this.socket = dgram.createSocket('udp4');
+
+            this.socket.on('message', (msg, rinfo) => {
+                this.handleSIPMessage(msg, rinfo);
+            });
+
+            this.socket.on('error', (error) => {
+                console.error('SIP socket error:', error);
+                this.emit('error', error);
+            });
+
+            this.socket.on('listening', () => {
+                const address = this.socket.address();
+                console.log(`✅ SIP client listening on ${address.address}:${address.port}`);
+                this.register();
+                
+                // Re-register every 50 seconds
+                this.registrationInterval = setInterval(() => {
+                    this.register();
+                }, 50000);
+                
+                resolve();
+            });
+
+            try {
+                this.socket.bind();
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    register() {
+        const message = [
+            `REGISTER sip:${this.options.host} SIP/2.0`,
+            `Via: SIP/2.0/UDP ${this.options.localIp}:${this.socket.address().port};branch=${this.branch}`,
+            `Max-Forwards: 70`,
+            `From: <sip:${this.options.extension}@${this.options.host}>;tag=${this.tag}`,
+            `To: <sip:${this.options.extension}@${this.options.host}>`,
+            `Call-ID: ${this.callId}`,
+            `CSeq: ${this.callSequence++} REGISTER`,
+            `Contact: <sip:${this.options.extension}@${this.options.localIp}:${this.socket.address().port}>`,
+            `Expires: 60`,
+            `User-Agent: VoiceAssistant/1.0`,
+            `Content-Length: 0`,
+            ``,
+            ``
+        ].join('\r\n');
+
+        const buffer = Buffer.from(message);
+        this.socket.send(buffer, 5060, this.options.host, (error) => {
+            if (error) {
+                console.error('Error sending REGISTER:', error);
+            } else {
+                console.log('Sent REGISTER to', this.options.host);
+            }
+        });
+    }
+
+    handleSIPMessage(msg, rinfo) {
+        const message = msg.toString();
+        
+        if (message.includes('401 Unauthorized')) {
+            console.log('Received 401 Unauthorized - sending authenticated REGISTER');
+            this.sendAuthenticatedRegister(message);
+        } else if (message.includes('200 OK') && message.includes('REGISTER')) {
+            if (!this.registered) {
+                console.log('✅ Successfully registered as extension', this.options.extension);
+                console.log(`✅ Successfully registered as extension ${this.options.extension} on ${this.options.host}`);
+                this.registered = true;
+                this.emit('registered');
+            }
+        } else if (message.includes('OPTIONS sip:')) {
+            console.log('Received OPTIONS request - sending 200 OK response');
+            this.respondToOptions(message, rinfo);
+        }
+    }
+
+    sendAuthenticatedRegister(challengeMessage) {
+        // Parse authentication challenge
+        const authMatch = challengeMessage.match(/WWW-Authenticate: Digest (.+)/);
+        if (!authMatch) {
+            console.error('Could not parse authentication challenge');
+            return;
+        }
+
+        const authParams = {};
+        authMatch[1].split(',').forEach(param => {
+            const [key, value] = param.trim().split('=');
+            authParams[key] = value ? value.replace(/"/g, '') : '';
+        });
+
+        const realm = authParams.realm || '';
+        const nonce = authParams.nonce || '';
+        const uri = `sip:${this.options.host}`;
+        const method = 'REGISTER';
+
+        // Calculate response
+        const ha1 = crypto.createHash('md5')
+            .update(`${this.options.extension}:${realm}:${this.options.password}`)
+            .digest('hex');
+        const ha2 = crypto.createHash('md5')
+            .update(`${method}:${uri}`)
+            .digest('hex');
+        const response = crypto.createHash('md5')
+            .update(`${ha1}:${nonce}:${ha2}`)
+            .digest('hex');
+
+        const authHeader = `Digest username="${this.options.extension}",realm="${realm}",nonce="${nonce}",uri="${uri}",response="${response}",algorithm=MD5`;
+
+        const message = [
+            `REGISTER sip:${this.options.host} SIP/2.0`,
+            `Via: SIP/2.0/UDP ${this.options.localIp}:${this.socket.address().port};branch=${this.generateBranch()}`,
+            `Max-Forwards: 70`,
+            `From: <sip:${this.options.extension}@${this.options.host}>;tag=${this.tag}`,
+            `To: <sip:${this.options.extension}@${this.options.host}>`,
+            `Call-ID: ${this.callId}`,
+            `CSeq: ${this.callSequence++} REGISTER`,
+            `Contact: <sip:${this.options.extension}@${this.options.localIp}:${this.socket.address().port}>`,
+            `Authorization: ${authHeader}`,
+            `Expires: 60`,
+            `User-Agent: VoiceAssistant/1.0`,
+            `Content-Length: 0`,
+            ``,
+            ``
+        ].join('\r\n');
+
+        const buffer = Buffer.from(message);
+        this.socket.send(buffer, 5060, this.options.host);
+    }
+
+    respondToOptions(message, rinfo) {
+        const callIdMatch = message.match(/Call-ID: (.+)/);
+        const cseqMatch = message.match(/CSeq: (.+)/);
+        const viaMatch = message.match(/Via: (.+)/);
+        const fromMatch = message.match(/From: (.+)/);
+        const toMatch = message.match(/To: (.+)/);
+
+        if (!callIdMatch || !cseqMatch || !viaMatch || !fromMatch || !toMatch) {
+            console.error('Could not parse OPTIONS request');
+            return;
+        }
+
+        const response = [
+            `SIP/2.0 200 OK`,
+            `${viaMatch[0]}`,
+            `${fromMatch[0]}`,
+            `${toMatch[0]}`,
+            `${callIdMatch[0]}`,
+            `${cseqMatch[0]}`,
+            `Contact: <sip:${this.options.extension}@${this.options.localIp}:${this.socket.address().port}>`,
+            `Accept: application/sdp`,
+            `Accept-Language: en`,
+            `Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, NOTIFY, MESSAGE, SUBSCRIBE, INFO`,
+            `Supported: replaces, timer`,
+            `User-Agent: VoiceAssistant/1.0`,
+            `Content-Length: 0`,
+            ``,
+            ``
+        ].join('\r\n');
+
+        const buffer = Buffer.from(response);
+        this.socket.send(buffer, rinfo.port, rinfo.address);
+    }
+
+    stop() {
+        if (this.registrationInterval) {
+            clearInterval(this.registrationInterval);
+        }
+        if (this.socket) {
+            this.socket.close();
+        }
+        console.log('✅ SIP client stopped');
+    }
+}
+
+// ============================================================
+// Initialize ARI and RTP Handlers
+// ============================================================
+
+async function initializeARI() {
+    if (!ARI_HOST || !ARI_USERNAME || !ARI_PASSWORD) {
+        console.log('⚠️  ARI not configured - phone calls will not work');
+        console.log('   Configure ARI_HOST, ARI_USERNAME, and ARI_PASSWORD in .env');
+        return;
+    }
+    
+    if (!SERVER_HOST) {
+        console.error('❌ FATAL: SERVER_HOST is not set in .env. Phone calls will fail.');
+        return;
+    }
+
+    try {
+        // Initialize RTP Handler
+        console.log('🎙️  Initializing RTP handler...');
+        
+        // ---
+        // *** FIX ***
+        // The RTP handler MUST bind to 0.0.0.0 to listen on all interfaces
+        // for incoming RTP from Asterisk, regardless of what RTP_HOST is set to.
+        // The advertised IP is SERVER_HOST, which is handled in ari-handler.js.
+        // ---
+        rtpHandler = new RTPHandler({
+            host: '0.0.0.0', // Force bind to all interfaces
+            port: parseInt(RTP_PORT)
+        });
+        console.log(`   (RTP handler forced to bind to 0.0.0.0:${RTP_PORT})`);
+
+
+        await rtpHandler.start();
+
+        // Initialize ARI Handler
+        console.log('🔌 Initializing ARI handler...');
+        ariHandler = new ARIHandler({
+            host: ARI_HOST,
+            port: parseInt(ARI_PORT),
+            username: ARI_USERNAME,
+            password: ARI_PASSWORD,
+            appName: ARI_APP_NAME,
+            rtpHost: RTP_HOST, // This is passed but will be (correctly) ignored by ari-handler
+            rtpPort: parseInt(RTP_PORT),
+            serverHost: SERVER_HOST, // This is the crucial public/advertised IP
+            openaiApiKey: OPENAI_API_KEY,
+            systemMessage: SYSTEM_MESSAGE,
+            tools: TOOLS
+        });
+
+        // Connect to ARI
+        await ariHandler.connect(ariClient);
+
+        // Set up event handlers for audio forwarding
+        setupARIEventHandlers();
+
+        console.log('✅ ARI integration initialized successfully');
+
+    } catch (error) {
+        console.error('❌ Failed to initialize ARI:', error);
+        console.error('   Phone calls will not work. Check:');
+        console.error('   1. ARI is enabled on FreePBX');
+        console.error('   2. Credentials are correct');
+        console.error('   3. Firewall allows port 8088');
+        console.error('   4. Network connectivity to FreePBX');
+    }
+}
+
+function setupARIEventHandlers() {
+    // Mapping: external media ID -> phone channel ID
+    const externalMediaToPhoneChannel = new Map();
+
+    // Forward audio from RTP to OpenAI
+    rtpHandler.on('audio', ({ callId, audio }) => {
+        if (ariHandler) {
+            // callId here is the external media ID
+            // We need to map it to the phone channel ID for OpenAI
+            const phoneChannelId = externalMediaToPhoneChannel.get(callId);
+            if (phoneChannelId) {
+                ariHandler.forwardAudioToOpenAI(phoneChannelId, audio);
+            } else {
+                console.error('❌ No phone channel mapping for external media:', callId);
+            }
+        }
+    });
+
+    // Forward audio from OpenAI to RTP
+    let audioToCallerCount = 0;
+    ariHandler.on('audio-to-caller', ({ callId, audio }) => {
+        audioToCallerCount++;
+        if (audioToCallerCount === 1) {
+            console.log(`🔊 Received first audio-to-caller event for ${callId}`);
+            console.log(`   Audio size: ${audio.length} chars (base64)`);
+        }
+        if (rtpHandler) {
+            rtpHandler.sendRTPPacket(callId, audio);
+        } else {
+            console.error('❌ RTP handler not available!');
+        }
+    });
+
+    // Handle function calls from phone conversations
+    ariHandler.on('function-call', async ({ callId, functionCall }) => {
+        console.log(`🔧 Function call from phone (${callId}):`, functionCall.name);
+
+        try {
+            const result = await handleFunctionCall(functionCall);
+
+            // Check if this is a transfer request
+            if (result.result && result.result.__transfer) {
+                const transferInfo = result.result;
+                console.log(`📞 Transfer requested to extension ${transferInfo.extension}`);
+
+                // Send the message to the caller first
+                ariHandler.sendFunctionResult(callId, functionCall.call_id, {
+                    result: transferInfo.message
+                });
+
+                // Wait a moment for the message to be spoken, then transfer
+                setTimeout(async () => {
+                    try {
+                        await ariHandler.transferCall(callId, transferInfo.extension, transferInfo.reason);
+                        console.log(`✅ Call ${callId} transferred to ${transferInfo.extension}`);
+                    } catch (error) {
+                        console.error(`❌ Failed to transfer call ${callId}:`, error);
+                    }
+                }, 3000); // Wait 3 seconds for AI to say the message
+            } else {
+                // Normal function result
+                ariHandler.sendFunctionResult(callId, functionCall.call_id, result);
+            }
+        } catch (error) {
+            console.error('Error handling function call:', error);
+            ariHandler.sendFunctionResult(callId, functionCall.call_id, {
+                error: 'Function call failed'
+            });
+        }
+    });
+
+    // Log call events
+    ariHandler.on('call-started', (info) => {
+        console.log('📞 Call started:', info.callerNumber || 'Unknown');
+        console.log('   Channel ID:', info.channelId);
+        console.log('   External Media ID:', info.externalMediaId);
+        
+        // FIXED: Create RTP session with only callId parameter
+        // The remote address/port will be discovered from first RTP packet
+
+        // Store mapping: external media ID -> phone channel ID
+        if (info.externalMediaId && info.channelId) {
+            externalMediaToPhoneChannel.set(info.externalMediaId, info.channelId);
+            console.log('🔗 Mapped external media', info.externalMediaId, '→ phone channel', info.channelId);
+        }
+
+        if (info.externalMediaId) {
+            rtpHandler.createSession(info.externalMediaId);
+        }
+    });
+
+    ariHandler.on('call-ended', (info) => {
+        console.log('📵 Call ended:', info.callerNumber || 'Unknown', `Duration: ${info.duration}s`);
+
+        // Remove all RTP sessions for this call
+
+        // Find and remove mapping
+        for (const [externalMediaId, phoneChannelId] of externalMediaToPhoneChannel.entries()) {
+            if (phoneChannelId === info.callId) {
+                externalMediaToPhoneChannel.delete(externalMediaId);
+                rtpHandler.removeSession(externalMediaId);
+                console.log('🗑️  Removed mapping for external media:', externalMediaId);
+                break;
+            }
+        }
+    });
+
+    ariHandler.on('call-transferred', (info) => {
+        console.log('🔀 Call transferred:', info.callerNumber || 'Unknown', `to extension ${info.extension}`);
+        console.log('   Reason:', info.reason);
+
+        // Find and remove mapping for transferred call
+        for (const [externalMediaId, phoneChannelId] of externalMediaToPhoneChannel.entries()) {
+            if (phoneChannelId === info.callId) {
+                externalMediaToPhoneChannel.delete(externalMediaId);
+                rtpHandler.removeSession(externalMediaId);
+                console.log('🗑️  Removed mapping for transferred call:', externalMediaId);
+                break;
+            }
+        }
+    });
+}
+
+// ============================================================
+// WebSocket handler for web interface
+// ============================================================
+
+fastify.register(async function (fastify) {
+    fastify.get('/ws', { websocket: true }, (socket, req) => {
+        console.log('WebSocket client connected (web interface)');
+        let openAiWs = null;
+
+        socket.on('message', (message) => {
+            try {
+                const data = JSON.parse(message);
+                console.log('Received WebSocket message:', data.type);
+                
+                if (data.type === 'start_call') {
+                    openAiWs = startWebRealtimeSession(socket);
+                } else if (data.type === 'audio_data' && data.audio) {
+                    if (openAiWs && openAiWs.readyState === 1) {
+                        const audioAppend = {
+                            type: 'input_audio_buffer.append',
+                            audio: data.audio
+                        };
+                        openAiWs.send(JSON.stringify(audioAppend));
+                    }
+                } else if (data.type === 'commit_audio') {
+                    if (openAiWs && openAiWs.readyState === 1) {
+                        openAiWs.send(JSON.stringify({
+                            type: 'input_audio_buffer.commit'
+                        }));
+                        openAiWs.send(JSON.stringify({
+                            type: 'response.create',
+                            response: {
+                                modalities: ['audio', 'text']
+                            }
+                        }));
+                    }
+                }
+            } catch (error) {
+                console.error('Error processing WebSocket message:', error);
+            }
+        });
+
+        socket.on('close', () => {
+            console.log('WebSocket client disconnected');
+            if (openAiWs) {
+                openAiWs.close();
+            }
+        });
+    });
+});
+
+// Start OpenAI Realtime Session for web interface
+// FIXED: Using correct OpenAI model name
+function startWebRealtimeSession(wsConnection) {
+    console.log('Starting OpenAI Realtime session for web client');
+    
+    let vadEnabled = false;  // Track if VAD has been enabled
+    
+    const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
+        headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'OpenAI-Beta': 'realtime=v1'
+        }
+    });
+
+    openAiWs.on('open', () => {
+        console.log('Connected to OpenAI Realtime API for web client');
+        
+        // Configure session WITHOUT server_vad initially (for reliable greeting)
+        const sessionUpdate = {
+            type: 'session.update',
+            session: {
+                turn_detection: null,  // Disabled initially
+                input_audio_format: 'pcm16',
+                output_audio_format: 'pcm16',
+                voice: VOICE,
+                instructions: SYSTEM_MESSAGE,
+                modalities: ['audio', 'text'],
+                temperature: 0.8,
+                tools: TOOLS
+            }
+        };
+
+        console.log('📤 Sending session config (VAD disabled for greeting)...');
+        openAiWs.send(JSON.stringify(sessionUpdate));
+
+        // Send initial greeting
+        const conversationItem = {
+            type: 'conversation.item.create',
+            item: {
+                type: 'message',
+                role: 'user',
+                content: [
+                    {
+                        type: 'input_text',
+                        text: 'Greet the user warmly and ask how you can help them today.'
+                    }
+                ]
+            }
+        };
+
+        openAiWs.send(JSON.stringify(conversationItem));
+        
+        const responseCreate = {
+            type: 'response.create',
+            response: {
+                modalities: ['audio', 'text']
+            }
+        };
+        
+        console.log('📤 Requesting initial greeting with audio (manual mode)...');
+        openAiWs.send(JSON.stringify(responseCreate));
+    });
+
+    openAiWs.on('message', (data) => {
+        try {
+            const response = JSON.parse(data.toString());
+            
+            if (LOG_EVENT_TYPES.includes(response.type)) {
+                console.log(`Received event: ${response.type}`);
+            }
+
+            // Handle errors with detailed logging
+            if (response.type === 'error') {
+                console.error('❌ OpenAI Error:', JSON.stringify(response.error, null, 2));
+                wsConnection.send(JSON.stringify({
+                    type: 'error',
+                    error: response.error
+                }));
+                return;
+            }
+
+            // Debug response.done to see why no audio
+            if (response.type === 'response.done') {
+                console.log('🔍 Response details:', JSON.stringify({
+                    id: response.response?.id,
+                    status: response.response?.status,
+                    output_length: response.response?.output?.length,
+                    modalities: response.response?.modalities,
+                    has_audio: response.response?.output?.some(o => o.type === 'audio'),
+                    output_types: response.response?.output?.map(o => o.type)
+                }, null, 2));
+                
+                // Enable server_vad after initial greeting
+                if (!vadEnabled) {
+                    console.log('🎙️ Enabling server VAD for ongoing conversation...');
+                    openAiWs.send(JSON.stringify({
+                        type: 'session.update',
+                        session: {
+                            turn_detection: { type: 'server_vad' }
+                        }
+                    }));
+                    vadEnabled = true;
+                }
+            }
+
+            // Forward relevant events to client
+            if (['response.audio.delta', 'response.audio.done', 'response.done', 'session.created'].includes(response.type)) {
+                wsConnection.send(JSON.stringify(response));
+            }
+
+            // Handle session created
+            if (response.type === 'session.created') {
+                console.log('OpenAI session created:', response.session.id);
+                wsConnection.send(JSON.stringify({
+                    type: 'session_ready',
+                    session_id: response.session.id
+                }));
+            }
+
+            // Handle function calls
+            if (response.type === 'response.done' && response.response.output) {
+                response.response.output.forEach(async item => {
+                    if (item.type === 'function_call') {
+                        const result = await handleFunctionCall(item);
+                        
+                        // Send result back
+                        const functionResponse = {
+                            type: 'conversation.item.create',
+                            item: {
+                                type: 'function_call_output',
+                                call_id: item.call_id,
+                                output: JSON.stringify(result)
+                            }
+                        };
+
+                        openAiWs.send(JSON.stringify(functionResponse));
+                        openAiWs.send(JSON.stringify({ 
+                            type: 'response.create',
+                            response: {
+                                modalities: ['audio', 'text']
+                            }
+                        }));
+                    }
+                });
+            }
+
+        } catch (error) {
+            console.error('Error processing OpenAI message:', error);
+        }
+    });
+
+    openAiWs.on('close', () => {
+        console.log('Disconnected from OpenAI Realtime API');
+    });
+
+    openAiWs.on('error', (error) => {
+        console.error('OpenAI WebSocket error:', error);
+    });
+
+    return openAiWs;
+}
+
+// ============================================================
+// Function Handlers
+// ============================================================
+
+async function handleFunctionCall(functionCall) {
+    console.log('Function call received:', functionCall.name);
+    
+    try {
+        let args = {};
+        
+        // Parse arguments
+        try {
+            args = typeof functionCall.arguments === 'string' 
+                ? JSON.parse(functionCall.arguments) 
+                : functionCall.arguments;
+        } catch (e) {
+            console.error('Error parsing function arguments:', e);
+            args = {};
+        }
+        
+        let result = '';
+        
+        switch (functionCall.name) {
+            case 'get_automotive_info':
+                result = await handleAutomotiveInfo(args);
+                break;
+            case 'schedule_appointment':
+                result = await handleScheduleAppointment(args);
+                break;
+            case 'request_towing':
+                result = await handleRequestTowing(args);
+                break;
+            case 'transfer_to_human':
+                result = await handleTransferToHuman(args);
+                break;
+            case 'request_callback':
+                result = await handleRequestCallback(args);
+                break;
+            default:
+                result = `I'm not familiar with that function. How else can I help you?`;
+        }
+
+        return { result };
+
+    } catch (error) {
+        console.error('Error in function handler:', error);
+        return { error: error.message };
+    }
+}
+
+async function handleAutomotiveInfo(args) {
+    console.log('Getting automotive info for:', args.service_type);
+    
+    const services = {
+        towing: 'Our towing service is available 24/7. Standard rates are $75 for the first 5 miles, then $3 per additional mile. Emergency towing is available with priority dispatch.',
+        repair: 'We offer comprehensive repair services including engine work, transmission, brakes, and electrical systems. Average turnaround time is 2-3 business days depending on the repair.',
+        maintenance: 'Regular maintenance includes oil changes ($45), tire rotations ($25), and full inspections ($89). We recommend service every 5,000 miles or 6 months.',
+        inspection: 'State inspections are $35 and typically take 30 minutes. We can often accommodate same-day appointments.'
+    };
+
+    return services[args.service_type] || 'Please specify the type of service you need information about.';
+}
+
+async function handleScheduleAppointment(args) {
+    console.log('Scheduling appointment:', args);
+    
+    // Send to webhook if configured
+    if (MAKE_WEBHOOK_URL) {
+        try {
+            await fetch(MAKE_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'appointment',
+                    data: args,
+                    timestamp: new Date().toISOString()
+                })
+            });
+        } catch (error) {
+            console.error('Error sending to webhook:', error);
+        }
+    }
+
+    return `Great! I've scheduled your ${args.service_type} appointment${args.preferred_date ? ` for ${args.preferred_date}` : ''}. You should receive a confirmation call at ${args.customer_phone} within the next hour to confirm the details.`;
+}
+
+async function handleRequestTowing(args) {
+    console.log('Towing requested:', args);
+
+    // Send to webhook if configured
+    if (MAKE_WEBHOOK_URL) {
+        try {
+            await fetch(MAKE_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'towing',
+                    data: args,
+                    timestamp: new Date().toISOString()
+                })
+            });
+        } catch (error) {
+            console.error('Error sending to webhook:', error);
+        }
+    }
+
+    const urgencyText = args.urgency === 'emergency' ? 'immediately' : 'within 30-45 minutes';
+    return `Help is on the way! A tow truck is being dispatched ${urgencyText} to ${args.location}. The driver will call you at ${args.customer_phone} when they're close. Stay safe!`;
+}
+
+async function handleTransferToHuman(args) {
+    console.log('Transfer to human requested:', args);
+
+    const extension = args.extension || '7021';
+    const reason = args.reason || 'Customer requested to speak with a human';
+
+    console.log(`   Checking availability of extension: ${extension}`);
+    console.log(`   Reason: ${reason}`);
+
+    // Check if the extension is online before attempting transfer
+    if (ariHandler) {
+        const isOnline = await ariHandler.isEndpointOnline(extension);
+
+        if (!isOnline) {
+            console.log(`   ❌ Extension ${extension} is offline - offering callback instead`);
+
+            // Return message asking for callback number instead of transferring
+            return `I'm sorry, but there's no one else available at the moment. I'd be happy to have a team member call you back. Could you please provide your phone number?`;
+        }
+
+        console.log(`   ✅ Extension ${extension} is online - proceeding with transfer`);
+    }
+
+    // The actual transfer will be handled by returning a special marker
+    // that the ARI handler will detect
+    return {
+        __transfer: true,
+        extension: extension,
+        reason: reason,
+        message: `Certainly! I'm transferring you to a team member now. Please hold for a moment.`
+    };
+}
+
+async function handleRequestCallback(args) {
+    console.log('Callback requested:', args);
+
+    const callbackData = {
+        customer_phone: args.customer_phone,
+        customer_name: args.customer_name || 'Not provided',
+        reason: args.reason,
+        preferred_time: args.preferred_time || 'ASAP',
+        timestamp: new Date().toISOString()
+    };
+
+    console.log('   Callback details:', callbackData);
+
+    // Send to webhook if configured
+    if (MAKE_WEBHOOK_URL) {
+        try {
+            await fetch(MAKE_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'callback_request',
+                    data: callbackData,
+                    timestamp: new Date().toISOString()
+                })
+            });
+            console.log('   ✅ Callback request sent to webhook');
+        } catch (error) {
+            console.error('   ❌ Error sending callback to webhook:', error);
+        }
+    }
+
+    return `Perfect! I've noted that you'd like a callback at ${args.customer_phone}. A team member will reach out to you as soon as possible. Is there anything else I can help you with right now?`;
+}
+
+// ============================================================
+// HTTP Routes
+// ============================================================
+
+// Health check
+fastify.get('/', async (request, reply) => {
+    return {
+        status: 'healthy',
+        service: 'FreePBX Voice Assistant with ARI',
+        version: '2.0',
+        features: {
+            web_interface: true,
+            phone_calls: !!ariHandler,
+            rtp_audio: !!rtpHandler
+        }
+    };
+});
+
+// Status endpoint
+fastify.get('/status', async (request, reply) => {
+    return {
+        sip_registered: sipClient ? sipClient.registered : false,
+        ari_connected: !!ariHandler,
+        rtp_server: !!rtpHandler,
+        active_calls: ariHandler ? ariHandler.getActiveCalls().length : 0,
+        rtp_sessions: rtpHandler ? rtpHandler.getSessions().length : 0
+    };
+});
+
+// ARI-specific endpoints
+fastify.get('/ari/calls', async (request, reply) => {
+    if (!ariHandler) {
+        return { error: 'ARI not initialized' };
+    }
+    return {
+        activeCalls: ariHandler.getActiveCalls()
+    };
+});
+
+fastify.get('/ari/rtp-sessions', async (request, reply) => {
+    if (!rtpHandler) {
+        return { error: 'RTP handler not initialized' };
+    }
+    return {
+        sessions: rtpHandler.getSessions()
+    };
+});
+
+// Initiate outbound call
+fastify.post('/ari/originate', async (request, reply) => {
+    if (!ariHandler) {
+        return reply.code(503).send({
+            error: 'ARI not initialized',
+            message: 'Phone call system is not available'
+        });
+    }
+
+    const { destination, context, callerId, variables } = request.body;
+
+    if (!destination) {
+        return reply.code(400).send({
+            error: 'Missing required parameter: destination',
+            message: 'Please provide a destination phone number or extension'
+        });
+    }
+
+    try {
+        console.log(`📞 Initiating outbound call to: ${destination}`);
+
+        const result = await ariHandler.makeOutboundCall({
+            destination,
+            context: context || 'from-internal',
+            callerId: callerId || SIP_EXTENSION,
+            variables: variables || {}
+        });
+
+        return {
+            success: true,
+            callId: result.callId,
+            destination: destination,
+            message: 'Outbound call initiated successfully'
+        };
+    } catch (error) {
+        console.error('❌ Error initiating outbound call:', error);
+        return reply.code(500).send({
+            error: 'Failed to initiate outbound call',
+            message: error.message
+        });
+    }
+});
+
+// Get specific call status
+fastify.get('/ari/calls/:callId', async (request, reply) => {
+    if (!ariHandler) {
+        return reply.code(503).send({
+            error: 'ARI not initialized'
+        });
+    }
+
+    const { callId } = request.params;
+    const callInfo = ariHandler.getCallInfo(callId);
+
+    if (!callInfo) {
+        return reply.code(404).send({
+            error: 'Call not found',
+            message: `No active call with ID ${callId}`
+        });
+    }
+
+    return {
+        callId: callId,
+        callerNumber: callInfo.callerNumber,
+        callerName: callInfo.callerName,
+        direction: callInfo.direction || 'inbound',
+        startTime: callInfo.startTime,
+        duration: Math.round((new Date() - callInfo.startTime) / 1000),
+        status: 'active'
+    };
+});
+
+// Hangup a specific call
+fastify.delete('/ari/calls/:callId', async (request, reply) => {
+    if (!ariHandler) {
+        return reply.code(503).send({
+            error: 'ARI not initialized'
+        });
+    }
+
+    const { callId } = request.params;
+
+    try {
+        await ariHandler.hangupCall(callId);
+        return {
+            success: true,
+            message: `Call ${callId} hung up successfully`
+        };
+    } catch (error) {
+        return reply.code(404).send({
+            error: 'Call not found',
+            message: error.message
+        });
+    }
+});
+
+// Diagnostics
+fastify.get('/diagnostics', async (request, reply) => {
+    return {
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        config: {
+            freepbx_host: FREEPBX_HOST,
+            sip_extension: SIP_EXTENSION,
+            ari_host: ARI_HOST,
+            ari_configured: !!(ARI_HOST && ARI_USERNAME && ARI_PASSWORD),
+            rtp_port: RTP_PORT
+        },
+        status: {
+            sip_registered: sipClient ? sipClient.registered : false,
+            ari_connected: !!ariHandler,
+            rtp_server_running: !!rtpHandler,
+            active_calls: ariHandler ? ariHandler.getActiveCalls().length : 0
+        }
+    };
+});
+
+// FIXED: Serve test client with correct filename
+fastify.get('/test-client.html', async (request, reply) => {
+
+// Serve enhanced dashboard
+fastify.get('/dashboard', async (request, reply) => {
+    const filePath = path.join(__dirname, 'dashboard.html');
+    if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        reply.type('text/html').send(content);
+    } else {
+        return reply.code(404).send({ error: 'Dashboard not found' });
+    }
+});
+
+fastify.get('/dashboard.html', async (request, reply) => {
+    const filePath = path.join(__dirname, 'dashboard.html');
+    if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        reply.type('text/html').send(content);
+    } else {
+        return reply.code(404).send({ error: 'Dashboard not found' });
+    }
+});
+    const filePath = path.join(__dirname, 'test-client.html');
+    if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        reply.type('text/html').send(content);
+    } else {
+        return reply.code(404).send({ error: 'Test client not found' });
+    }
+});
+
+// ============================================================
+// Startup
+// ============================================================
+
+async function start() {
+    try {
+        // Initialize ARI and RTP if configured
+        await initializeARI();
+
+        // Initialize SIP client for registration monitoring (optional)
+        if (SIP_PASSWORD && FREEPBX_HOST && SIP_EXTENSION) {
+            console.log('📞 Initializing SIP client for registration monitoring...');
+            sipClient = new FreePBXSIPClient({
+                host: FREEPBX_HOST,
+                extension: SIP_EXTENSION,
+                password: SIP_PASSWORD,
+                localIp: SERVER_HOST || '0.0.0.0'
+            });
+
+            await sipClient.start();
+        } else {
+            console.log('⚠️  SIP client not configured - registration monitoring disabled');
+        }
+
+        // Start Fastify server
+        await fastify.listen({ port: SERVER_PORT, host: '0.0.0.0' });
+        
+        console.log('');
+        console.log('✅ Server started successfully!');
+        console.log('');
+        console.log('📍 Endpoints:');
+        console.log(`   Web Interface: http://localhost:${SERVER_PORT}/test-client.html`);
+        console.log(`   Status: http://localhost:${SERVER_PORT}/status`);
+        console.log(`   Health: http://localhost:${SERVER_PORT}/`);
+        console.log(`   ARI Calls: http://localhost:${SERVER_PORT}/ari/calls`);
+        console.log(`   RTP Sessions: http://localhost:${SERVER_PORT}/ari/rtp-sessions`);
+        console.log('');
+        console.log('🎉 Ready to handle web and phone calls!');
+        
+    } catch (error) {
+        console.error('❌ Failed to start server:', error);
+        process.exit(1);
+    }
+}
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('\n📴 Shutting down gracefully...');
+    
+    if (ariHandler) {
+        await ariHandler.disconnect();
+    }
+    
+    if (rtpHandler) {
+        rtpHandler.stop();
+    }
+    
+    if (sipClient) {
+        sipClient.stop();
+    }
+    
+    await fastify.close();
+    console.log('✅ Shutdown complete');
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    console.log('\n📴 Received SIGTERM, shutting down...');
+    
+    if (ariHandler) {
+        await ariHandler.disconnect();
+    }
+    
+    if (rtpHandler) {
+        rtpHandler.stop();
+    }
+    
+    if (sipClient) {
+        sipClient.stop();
+    }
+    
+    await fastify.close();
+    process.exit(0);
+});
+
+// Start the server
+start();
+

@@ -1,0 +1,23 @@
+[Unit]
+Description=FreePBX OpenAI Voice Assistant
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/freepbx-voice-assistant
+
+# --- MODIFIED ExecStart ---
+# We now use bash to 'source' the .env file before running node.
+# 'set -a' ensures all variables in the .env file are exported to the environment.
+# 'set +a' stops this behavior after sourcing.
+ExecStart=/bin/bash -c "set -a && source /opt/freepbx-voice-assistant/.env && set +a && /usr/bin/node index.js"
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
