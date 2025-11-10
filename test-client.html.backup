@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Assistant Test Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: bold;
+        }
+        
+        .status.disconnected {
+            background-color: #ffebee;
+            color: #c62828;
+            border: 1px solid #ef5350;
+        }
+        
+        .status.connected {
+            background-color: #e8f5e8;
+            color: #2e7d32;
+            border: 1px solid #4caf50;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 20px 0;
+        }
+        
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .connect-btn {
+            background-color: #4caf50;
+            color: white;
+        }
+        
+        .connect-btn:hover:not(:disabled) {
+            background-color: #45a049;
+        }
+        
+        .disconnect-btn {
+            background-color: #f44336;
+            color: white;
+        }
+        
+        .disconnect-btn:hover:not(:disabled) {
+            background-color: #da190b;
+        }
+        
+        .record-btn {
+            background-color: #2196f3;
+            color: white;
+            font-size: 18px;
+            padding: 15px 30px;
+            border-radius: 50px;
+        }
+        
+        .record-btn:hover:not(:disabled) {
+            background-color: #1976d2;
+        }
+        
+        .record-btn.recording {
+            background-color: #ff5722;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        
+        .log {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 5px;
+            padding: 15px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+            margin-top: 20px;
+        }
+        
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+        
+        .log-entry.info {
+            color: #0066cc;
+        }
+        
+        .log-entry.success {
+            color: #28a745;
+        }
+        
+        .log-entry.error {
+            color: #dc3545;
+        }
+        
+        .audio-controls {
+            margin: 20px 0;
+        }
+        
+        .volume-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        
+        input[type="range"] {
+            flex: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Voice Assistant Test Client <small style="color: #666; font-size: 0.6em;">v4.0</small></h1>
+        
+        <div id="status" class="status disconnected">
+            Disconnected
+        </div>
+        
+        <div class="controls">
+            <button id="connectBtn" class="connect-btn">Connect to Server</button>
+            <button id="disconnectBtn" class="disconnect-btn" disabled>Disconnect</button>
+        </div>
+        
+        <div class="audio-controls">
+            <div class="volume-control">
+                <label for="inputVolume">Input Volume:</label>
+                <input type="range" id="inputVolume" min="0" max="100" value="50">
+                <span id="inputVolumeValue">50%</span>
+            </div>
+            <div class="volume-control">
+                <label for="outputVolume">Output Volume:</label>
+                <input type="range" id="outputVolume" min="0" max="100" value="75">
+                <span id="outputVolumeValue">75%</span>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button id="recordBtn" class="record-btn" disabled>
+                🎤 Hold to Talk
+            </button>
+        </div>
+        
+        <div class="log" id="log">
+            <div class="log-entry info">Ready to connect...</div>
+        </div>
+    </div>
+
+    <script>
+        class VoiceAssistantClient {
+            constructor() {
+                this.ws = null;
+                this.mediaRecorder = null;
+                this.audioContext = null;
+                this.playbackContext = null;
+                this.nextPlayTime = 0;
+                this.isRecording = false;
+                this.isConnected = false;
+                this.audioQueue = [];
+                this.audioChunksSent = 0;
+                
+                this.initializeElements();
+                this.setupEventListeners();
+            }
+            
+            initializeElements() {
+                this.statusEl = document.getElementById('status');
+                this.connectBtn = document.getElementById('connectBtn');
+                this.disconnectBtn = document.getElementById('disconnectBtn');
+                this.recordBtn = document.getElementById('recordBtn');
+                this.logEl = document.getElementById('log');
+                this.inputVolumeEl = document.getElementById('inputVolume');
+                this.outputVolumeEl = document.getElementById('outputVolume');
+                this.inputVolumeValueEl = document.getElementById('inputVolumeValue');
+                this.outputVolumeValueEl = document.getElementById('outputVolumeValue');
+            }
+            
+            setupEventListeners() {
+                this.connectBtn.addEventListener('click', () => this.connect());
+                this.disconnectBtn.addEventListener('click', () => this.disconnect());
+                
+                this.recordBtn.addEventListener('mousedown', () => this.startRecording());
+                this.recordBtn.addEventListener('mouseup', () => this.stopRecording());
+                this.recordBtn.addEventListener('mouseleave', () => this.stopRecording());
+                
+                // Touch events for mobile
+                this.recordBtn.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    this.startRecording();
+                });
+                this.recordBtn.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    this.stopRecording();
+                });
+                
+                // Volume controls
+                this.inputVolumeEl.addEventListener('input', (e) => {
+                    this.inputVolumeValueEl.textContent = e.target.value + '%';
+                });
+                
+                this.outputVolumeEl.addEventListener('input', (e) => {
+                    this.outputVolumeValueEl.textContent = e.target.value + '%';
+                });
+                
+                // Keyboard shortcuts
+                document.addEventListener('keydown', (e) => {
+                    if (e.code === 'Space' && this.isConnected) {
+                        e.preventDefault();
+                        if (!this.isRecording) {
+                            this.startRecording();
+                        }
+                    }
+                });
+                
+                document.addEventListener('keyup', (e) => {
+                    if (e.code === 'Space' && this.isRecording) {
+                        e.preventDefault();
+                        this.stopRecording();
+                    }
+                });
+            }
+            
+            log(message, type = 'info') {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.className = `log-entry ${type}`;
+                logEntry.textContent = `[${timestamp}] ${message}`;
+                this.logEl.appendChild(logEntry);
+                this.logEl.scrollTop = this.logEl.scrollHeight;
+            }
+            
+            updateStatus(status, isConnected = false) {
+                this.statusEl.textContent = status;
+                this.statusEl.className = `status ${isConnected ? 'connected' : 'disconnected'}`;
+                this.isConnected = isConnected;
+                
+                this.connectBtn.disabled = isConnected;
+                this.disconnectBtn.disabled = !isConnected;
+                this.recordBtn.disabled = !isConnected;
+            }
+            
+            async connect() {
+                try {
+                    // Get server URL from current location
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = `${protocol}//${window.location.host}/ws`;
+                    
+                    this.log(`Connecting to ${wsUrl}...`);
+                    this.ws = new WebSocket(wsUrl);
+                    
+                    this.ws.onopen = () => {
+                        this.log('Connected to voice assistant server', 'success');
+                        this.updateStatus('Connected - Ready to talk', true);
+                        
+                        // Start the call session
+                        this.ws.send(JSON.stringify({ type: 'start_call' }));
+                    };
+                    
+                    this.ws.onmessage = (event) => {
+                        this.handleServerMessage(JSON.parse(event.data));
+                    };
+                    
+                    this.ws.onclose = () => {
+                        this.log('Disconnected from server', 'error');
+                        this.updateStatus('Disconnected');
+                        this.ws = null;
+                    };
+                    
+                    this.ws.onerror = (error) => {
+                        this.log(`WebSocket error: ${error}`, 'error');
+                        this.updateStatus('Connection Error');
+                    };
+                    
+                } catch (error) {
+                    this.log(`Connection failed: ${error.message}`, 'error');
+                    this.updateStatus('Connection Failed');
+                }
+            }
+            
+            disconnect() {
+                if (this.ws) {
+                    this.ws.close();
+                    this.ws = null;
+                }
+                if (this.playbackContext) {
+                    this.playbackContext.close();
+                    this.playbackContext = null;
+                }
+                this.nextPlayTime = 0;
+                this.updateStatus('Disconnected');
+                this.log('Disconnected from server');
+            }
+            
+            handleServerMessage(data) {
+                switch (data.type) {
+                    case 'session_ready':
+                        this.log(`OpenAI session ready: ${data.session_id}`, 'success');
+                        break;
+                        
+                    case 'response.audio.delta':
+                        if (data.delta) {
+                            this.playAudio(data.delta);
+                        }
+                        break;
+                        
+                    case 'response.audio.done':
+                        this.log('Assistant finished speaking', 'info');
+                        break;
+                        
+                    case 'response.done':
+                        this.log('Response completed', 'success');
+                        break;
+                        
+                    default:
+                        console.log('Received message:', data);
+                }
+            }
+            
+            async startRecording() {
+                if (!this.isConnected || this.isRecording) return;
+                
+                try {
+                    // Check if getUserMedia is available
+                    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                        this.log('❌ Microphone access requires HTTPS!', 'error');
+                        this.log('Solution 1: Access via https://www.pastime.agency:3000', 'error');
+                        this.log('Solution 2: Set up SSL certificate (see HTTPS-SETUP.md)', 'error');
+                        this.log('Solution 3: Test via SSH tunnel (see SSH-TUNNEL-TEST.md)', 'error');
+                        alert('Microphone access requires HTTPS!\n\n' +
+                              'To use this feature:\n' +
+                              '1. Set up HTTPS with SSL certificate, OR\n' +
+                              '2. Access via SSH tunnel to localhost:3000\n\n' +
+                              'See documentation for setup instructions.');
+                        return;
+                    }
+                    
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            channelCount: 1,
+                            sampleRate: 24000,  // Match OpenAI Realtime API pcm16 format (24kHz)
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        }
+                    });
+                    
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 24000  // Match OpenAI Realtime API pcm16 format
+                    });
+                    
+                    const source = this.audioContext.createMediaStreamSource(stream);
+                    const processor = this.audioContext.createScriptProcessor(4096, 1, 1);
+                    
+                    processor.onaudioprocess = (event) => {
+                        if (this.isRecording) {
+                            try {
+                                const inputBuffer = event.inputBuffer;
+                                const channelData = inputBuffer.getChannelData(0);
+                                
+                                // Convert to 16-bit PCM
+                                const pcmData = new Int16Array(channelData.length);
+                                const inputVolume = this.inputVolumeEl ? this.inputVolumeEl.value / 100 : 0.5;
+                                
+                                for (let i = 0; i < channelData.length; i++) {
+                                    const sample = channelData[i] * inputVolume;
+                                    pcmData[i] = Math.max(-1, Math.min(1, sample)) * 0x7FFF;
+                                }
+                                
+                                // Send audio to server
+                                const base64Audio = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+                                
+                                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                                    this.ws.send(JSON.stringify({
+                                        type: 'audio_data',
+                                        audio: base64Audio
+                                    }));
+                                    this.audioChunksSent++;
+                                    if (this.audioChunksSent === 1) {
+                                        this.log('Sending audio to server...', 'info');
+                                    }
+                                } else {
+                                    console.error('WebSocket not open, readyState:', this.ws ? this.ws.readyState : 'null');
+                                    this.log('WebSocket not connected!', 'error');
+                                }
+                            } catch (error) {
+                                console.error('Error sending audio:', error);
+                                this.log('Error sending audio: ' + error.message, 'error');
+                            }
+                        }
+                    };
+                    
+                    source.connect(processor);
+                    processor.connect(this.audioContext.destination);
+                    
+                    this.isRecording = true;
+                    this.recordBtn.textContent = '🔴 Recording... (Release to stop)';
+                    this.recordBtn.classList.add('recording');
+                    this.log('Started recording', 'info');
+                    
+                } catch (error) {
+                    this.log(`Failed to start recording: ${error.message}`, 'error');
+                }
+            }
+            
+            stopRecording() {
+                if (!this.isRecording) return;
+                
+                this.isRecording = false;
+                this.recordBtn.textContent = '🎤 Hold to Talk';
+                this.recordBtn.classList.remove('recording');
+                this.log(`Stopped recording (sent ${this.audioChunksSent} audio chunks)`, 'info');
+                
+                // Send commit signal to tell OpenAI to process the audio
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify({
+                        type: 'commit_audio'
+                    }));
+                    this.log('Committing audio for processing...', 'info');
+                }
+                
+                this.audioChunksSent = 0;
+                
+                if (this.audioContext) {
+                    this.audioContext.close();
+                    this.audioContext = null;
+                }
+            }
+            
+            playAudio(base64Audio) {
+                try {
+                    // Create persistent audio context if not exists
+                    if (!this.playbackContext) {
+                        this.playbackContext = new (window.AudioContext || window.webkitAudioContext)({
+                            sampleRate: 24000  // OpenAI Realtime API uses 24kHz for PCM16
+                        });
+                        this.nextPlayTime = 0;
+                    }
+                    
+                    // Decode base64 audio
+                    const binaryString = atob(base64Audio);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    // Convert PCM16 to Float32
+                    const int16Array = new Int16Array(bytes.buffer);
+                    const float32Array = new Float32Array(int16Array.length);
+                    
+                    const outputVolume = this.outputVolumeEl.value / 100;
+                    
+                    // Convert Int16 to Float32 with proper scaling
+                    for (let i = 0; i < int16Array.length; i++) {
+                        float32Array[i] = (int16Array[i] / 32768.0) * outputVolume;
+                    }
+                    
+                    // Create audio buffer with matching sample rate
+                    const audioBuffer = this.playbackContext.createBuffer(
+                        1,  // mono
+                        float32Array.length,
+                        this.playbackContext.sampleRate
+                    );
+                    audioBuffer.copyToChannel(float32Array, 0);
+                    
+                    // Schedule playback
+                    const source = this.playbackContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(this.playbackContext.destination);
+                    
+                    // Calculate when to start this chunk
+                    const currentTime = this.playbackContext.currentTime;
+                    const startTime = Math.max(currentTime, this.nextPlayTime);
+                    
+                    source.start(startTime);
+                    
+                    // Update next play time
+                    this.nextPlayTime = startTime + audioBuffer.duration;
+                    
+                } catch (error) {
+                    console.error('Error playing audio:', error);
+                }
+            }
+        }
+        
+        // Initialize the client
+        const client = new VoiceAssistantClient();
+        
+        // Check if HTTPS or localhost
+        const isSecure = window.location.protocol === 'https:' || 
+                        window.location.hostname === 'localhost' || 
+                        window.location.hostname === '127.0.0.1';
+        
+        // Show instructions
+        client.log('Voice Assistant Test Client v4 loaded');
+        client.log('✅ This version sends commit signal when you stop speaking!');
+        
+        if (!isSecure) {
+            client.log('⚠️ WARNING: Not using HTTPS!', 'error');
+            client.log('Microphone access requires HTTPS or localhost', 'error');
+            client.log('Current URL: ' + window.location.protocol + '//' + window.location.host, 'error');
+            client.log('', 'info');
+            client.log('To fix:', 'info');
+            client.log('1. Access via https://www.pastime.agency/test-client.html', 'info');
+            client.log('2. Or set up SSL certificate (see HTTPS-SETUP.md)', 'info');
+            client.log('3. Or use SSH tunnel to test via localhost (see SSH-TUNNEL-TEST.md)', 'info');
+            client.log('', 'info');
+        } else {
+            client.log('✅ Secure connection detected', 'success');
+            client.log('Microphone access should work', 'success');
+            client.log('', 'info');
+        }
+        
+        client.log('Click "Connect to Server" to start');
+        client.log('Use Space key or hold the microphone button to talk');
+        client.log('Make sure your server is running on the same host');
+    </script>
+</body>
+</html>
