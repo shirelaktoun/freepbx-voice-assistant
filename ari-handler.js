@@ -875,7 +875,8 @@ export class ARIHandler extends EventEmitter {
      * Make an outbound call with automatic endpoint detection
      */
     async makeOutboundCall(options) {
-        const { destination, context, callerId, variables, technology } = options;
+        const { destination, context, callerId, variables, technology, agentType } = options;
+        const agent = agentType || 'service';  // Default to Sophie
 
         if (!this.ari) {
             throw new Error('ARI not connected');
@@ -925,7 +926,7 @@ export class ARIHandler extends EventEmitter {
                     await channel.originate({
                         endpoint: tryEndpoint,
                         app: this.config.appName,
-                        appArgs: 'outbound',
+                        appArgs: `outbound,${agent}`,  // Pass outbound flag and agent type
                         callerId: callerId,
                         timeout: 30,
                         variables: channelVars

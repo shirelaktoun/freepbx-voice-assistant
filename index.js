@@ -2395,7 +2395,7 @@ fastify.post('/ari/originate', async (request, reply) => {
         });
     }
 
-    const { destination, context, callerId, variables } = request.body;
+    const { destination, context, callerId, variables, agentType } = request.body;
 
     if (!destination) {
         return reply.code(400).send({
@@ -2405,13 +2405,21 @@ fastify.post('/ari/originate', async (request, reply) => {
     }
 
     try {
-        console.log(`📞 Initiating outbound call to: ${destination}`);
+        const agent = agentType || 'service';  // Default to Sophie
+        const agentNames = {
+            'service': 'Sophie',
+            'accounts': 'Alex',
+            'wellbeing': 'Emma',
+            'wellbeing_tr': 'Yeliz'
+        };
+        console.log(`📞 Initiating outbound call to: ${destination} using ${agentNames[agent]}`);
 
         const result = await ariHandler.makeOutboundCall({
             destination,
             context: context || 'from-internal',
             callerId: callerId || SIP_EXTENSION,
-            variables: variables || {}
+            variables: variables || {},
+            agentType: agent
         });
 
         return {

@@ -247,6 +247,16 @@
     <div class="container">
         <h1>🎤 Voice Assistant Test Client <small style="color: #666; font-size: 0.6em;">v4.0</small></h1>
         
+        <div style="margin-bottom: 20px;">
+            <label for="agentSelect" style="display: block; margin-bottom: 8px; color: #666; font-weight: 500;">Select Agent to Test:</label>
+            <select id="agentSelect" style="width: 100%; padding: 12px; border: 2px solid #2196f3; border-radius: 5px; font-size: 16px; background: white;">
+                <option value="service">Sophie - Service Agent (English)</option>
+                <option value="accounts">Alex - Accounts Agent (English)</option>
+                <option value="wellbeing">Emma - Wellbeing Agent (English)</option>
+                <option value="wellbeing_tr">Yeliz - Wellbeing Agent (Turkish)</option>
+            </select>
+        </div>
+
         <div id="status" class="status disconnected">
             Disconnected
         </div>
@@ -284,6 +294,15 @@
     <div class="container" style="margin-top: 20px;">
         <div class="outbound-section">
             <h2>📞 Outbound Calls</h2>
+            <div style="margin-bottom: 15px;">
+                <label for="outboundAgentSelect" style="display: block; margin-bottom: 8px; color: #666; font-weight: 500;">Agent:</label>
+                <select id="outboundAgentSelect" style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 16px;">
+                    <option value="service">Sophie - Service Agent (ext 1000)</option>
+                    <option value="accounts">Alex - Accounts Agent (ext 1005)</option>
+                    <option value="wellbeing">Emma - Wellbeing Agent (ext 3000)</option>
+                    <option value="wellbeing_tr">Yeliz - Turkish Wellbeing (ext 3001)</option>
+                </select>
+            </div>
             <div class="phone-input-group">
                 <input type="text" id="phoneNumber" placeholder="Enter phone number or extension (e.g., 1003 or +1234567890)" />
                 <button id="makeCallBtn" class="call-btn" onclick="outboundCaller.makeCall()">Make Call</button>
@@ -403,11 +422,11 @@
                     this.ws = new WebSocket(wsUrl);
                     
                     this.ws.onopen = () => {
-                        this.log('Connected to voice assistant server', 'success');
-                        this.updateStatus('Connected - Ready to talk', true);
+                        const agentType = document.getElementById('agentSelect').value; const agentNames = { 'service': 'Sophie', 'accounts': 'Alex', 'wellbeing': 'Emma', 'wellbeing_tr': 'Yeliz' }; this.log(`Connected (${agentNames[agentType]})`, 'success');
+                        this.updateStatus(`${agentNames[agentType]} Ready`, true);
                         
                         // Start the call session
-                        this.ws.send(JSON.stringify({ type: 'start_call' }));
+                        this.ws.send(JSON.stringify({ type: 'start_call', agentType: agentType }));
                     };
                     
                     this.ws.onmessage = (event) => {
@@ -677,17 +696,37 @@
 
             async makeCall() {
                 const phoneNumber = document.getElementById('phoneNumber').value.trim();
+                const agentType = document.getElementById('outboundAgentSelect').value;
 
                 if (!phoneNumber) {
                     alert('Please enter a phone number or extension');
                     return;
                 }
 
+                // Map agent types to caller IDs
+                const agentCallerIds = {
+                    'service': '1000',        // Sophie
+                    'accounts': '1005',       // Alex
+                    'wellbeing': '3000',      // Emma
+                    'wellbeing_tr': '3001'    // Yeliz
+                };
+
+                const agentNames = {
+                    'service': 'Sophie',
+                    'accounts': 'Alex',
+                    'wellbeing': 'Emma',
+                    'wellbeing_tr': 'Yeliz'
+                };
+
+                const callerId = agentCallerIds[agentType] || '1000';
+
                 const makeCallBtn = document.getElementById('makeCallBtn');
                 makeCallBtn.disabled = true;
                 makeCallBtn.textContent = 'Calling...';
 
                 try {
+                    client.log(`📞 Making call to ${phoneNumber} using ${agentNames[agentType]} (ext ${callerId})`, 'info');
+
                     const response = await fetch('/ari/originate', {
                         method: 'POST',
                         headers: {
@@ -695,7 +734,8 @@
                         },
                         body: JSON.stringify({
                             destination: phoneNumber,
-                            callerId: '1002'
+                            callerId: callerId,
+                            agentType: agentType
                         })
                     });
 
