@@ -434,6 +434,20 @@ export class RTPHandler extends EventEmitter {
         }
     }
 
+    /**
+     * Clear audio queue for a call (used for interruptions)
+     */
+    clearAudioQueue(callId) {
+        const queue = this.packetQueues.get(callId);
+        if (queue && queue.length > 0) {
+            const cleared = queue.length;
+            this.packetQueues.set(callId, []);
+            console.log(`🗑️  Cleared ${cleared} queued audio packets for ${callId} (interruption)`);
+            return cleared;
+        }
+        return 0;
+    }
+
     getSessions() {
         return Array.from(this.sessions.entries()).map(([callId, session]) => ({
             callId,
