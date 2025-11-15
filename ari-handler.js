@@ -98,29 +98,38 @@ export class ARIHandler extends EventEmitter {
 
         // Determine which agent to use based on event args
         const isAccountsAgent = event.args && event.args.includes('accounts');
-        const agentType = isAccountsAgent ? 'accounts' : 'service';
-        const agentName = isAccountsAgent ? 'Alex (Accounts)' : 'Sophie (Service)';
+        const isWellbeingAgent = event.args && event.args.includes('wellbeing');
+        let agentType = 'service';  // default
+        let agentName = 'Sophie (Service)';  // default
+
+        if (isAccountsAgent) {
+            agentType = 'accounts';
+            agentName = 'Alex (Accounts)';
+        } else if (isWellbeingAgent) {
+            agentType = 'wellbeing';
+            agentName = 'Emma (Wellbeing)';
+        }
 
         console.log(`📞 ${isOutbound ? 'Outbound' : 'Incoming'} call ${isOutbound ? 'to' : 'from'}: ${callerName || 'Unknown'} ${callerNumber || 'Unknown'}`);
         console.log('📞 Channel ID:', callId);
-        console.log('📞 Call Direction:', callDirection);
+        // console.log('📞 Call Direction:', callDirection);
         console.log(`🤖 Agent: ${agentName}`);
 
         try {
             // Answer the call (only for inbound calls - outbound are already answered)
             if (!isOutbound) {
                 await channel.answer();
-                console.log('✅ Call answered');
+                // console.log('✅ Call answered');
             } else {
-                console.log('✅ Outbound call connected');
+                // console.log('✅ Outbound call connected');
             }
 
             // Log channel codec information
-            console.log('📊 Channel details:');
-            console.log('   Name:', channel.name);
-            console.log('   Connected:', channel.connected?.name || 'none');
+            // console.log('📊 Channel details:');
+            // console.log('   Name:', channel.name);
+            // console.log('   Connected:', channel.connected?.name || 'none');
             if (channel.nativeformats) {
-                console.log('   Native formats:', channel.nativeformats);
+                // console.log('   Native formats:', channel.nativeformats);
             }
 
             // Store call info
@@ -138,11 +147,11 @@ export class ARIHandler extends EventEmitter {
             // Create a bridge for mixing audio
             const bridge = this.ari.Bridge();
             await bridge.create({ type: 'mixing', name: `bridge-${callId}` });
-            console.log('🌉 Bridge created:', bridge.id);
+            // console.log('🌉 Bridge created:', bridge.id);
 
             // Add channel to bridge
             await bridge.addChannel({ channel: callId });
-            console.log('🔗 Channel added to bridge');
+            // console.log('🔗 Channel added to bridge');
 
             // Store bridge reference
             const callData = this.activeCalls.get(callId);
@@ -163,27 +172,27 @@ export class ARIHandler extends EventEmitter {
                 format: 'ulaw', // 8kHz ulaw - this worked for internal calls
                 encapsulation: 'rtp',
                 transport: 'udp',
-                connection_type: 'client',
+                connection_type: 'server', // We run RTP server, Asterisk sends to us first
                 direction: 'both'
             });
-            console.log('🎙️ External media channel created:', externalMedia.id);
-            console.log('   RTP endpoint configured:', `${rtpHost}:${this.config.rtpPort}`);
-            console.log('   External media channel name:', externalMedia.name);
+            // console.log('🎙️ External media channel created:', externalMedia.id);
+            // console.log('   RTP endpoint configured:', `${rtpHost}:${this.config.rtpPort}`);
+            // console.log('   External media channel name:', externalMedia.name);
             if (externalMedia.nativeformats) {
-                console.log('   External media native formats:', externalMedia.nativeformats);
+                // console.log('   External media native formats:', externalMedia.nativeformats);
             }
 
             callData.externalMedia = externalMedia;
 
             // Add external media to bridge
             await bridge.addChannel({ channel: externalMedia.id });
-            console.log('🔗 External media added to bridge');
+            // console.log('🔗 External media added to bridge');
 
             // Log bridge details to help diagnose codec issues
-            console.log('🌉 Bridge details:');
-            console.log('   Bridge ID:', bridge.id);
-            console.log('   Bridge type:', bridge.bridge_type);
-            console.log('   Channels in bridge:', bridge.channels?.length || 0);
+            // console.log('🌉 Bridge details:');
+            // console.log('   Bridge ID:', bridge.id);
+            // console.log('   Bridge type:', bridge.bridge_type);
+            // console.log('   Channels in bridge:', bridge.channels?.length || 0);
 
             // Start OpenAI session for this call
             await this.startOpenAISession(callId, callerNumber);
@@ -196,7 +205,8 @@ export class ARIHandler extends EventEmitter {
                 direction: callDirection,
                 channelId: channel.id,
                 bridgeId: bridge.id,
-                externalMediaId: externalMedia.id
+                externalMediaId: externalMedia.id,
+                agentType: agentType
             });
 
         } catch (error) {
@@ -240,7 +250,8 @@ export class ARIHandler extends EventEmitter {
                 callerNumber,
                 startTime: new Date(),
                 vadEnabled: false,
-                direction: callDirection
+                direction: callDirection,
+                hasActiveResponse: false
             });
 
             // Set up OpenAI WebSocket handlers
@@ -279,19 +290,35 @@ export class ARIHandler extends EventEmitter {
         const callData = this.activeCalls.get(callId);
         const agentType = callData?.agentType || 'service';
         const isAccountsAgent = agentType === 'accounts';
+        const isWellbeingAgent = agentType === 'wellbeing';
 
         // Select appropriate configuration based on agent type
-        const systemMessage = isAccountsAgent ? this.config.accountsSystemMessage : this.config.systemMessage;
-        const tools = isAccountsAgent ? this.config.accountsTools : this.config.tools;
-        const agentName = isAccountsAgent ? 'Alex (Accounts)' : 'Sophie (Service)';
+        let systemMessage, tools, agentName;
+
+        if (isAccountsAgent) {
+            systemMessage = this.config.accountsSystemMessage;
+            tools = this.config.accountsTools;
+            agentName = 'Alex (Accounts)';
+        } else if (isWellbeingAgent) {
+            systemMessage = this.config.wellbeingSystemMessage;
+            tools = this.config.wellbeingTools;
+            agentName = 'Emma (Wellbeing)';
+        } else {
+            systemMessage = this.config.systemMessage;
+            tools = this.config.tools;
+            agentName = 'Sophie (Service)';
+        }
 
         console.log(`🤖 Initializing OpenAI session for ${agentName}`);
 
         // Configure OpenAI to use g711_ulaw (8kHz)
         // This format worked for internal calls
-        // Select voice based on agent type: echo (male) for Alex, shimmer (female) for Sophie
-        const voice = isAccountsAgent ? 'echo' : 'shimmer';
-        console.log(`🎤 Selected voice: ${voice} (Agent type: ${agentType}, Is accounts: ${isAccountsAgent})`);
+        // Select voice based on agent type: echo (male) for Alex, shimmer (female) for Sophie/Emma
+        let voice = 'shimmer';  // default for Sophie and Emma
+        if (isAccountsAgent) {
+            voice = 'echo';  // male voice for Alex
+        }
+        console.log(`🎤 Selected voice: ${voice} (Agent type: ${agentType})`);
 
         const sessionUpdate = {
             type: 'session.update',
@@ -318,6 +345,8 @@ export class ARIHandler extends EventEmitter {
             // Outbound call greeting
             if (isAccountsAgent) {
                 greetingText = this.config.accountsOutboundGreeting || "Hello! This is Alex calling from Deepcut Garage accounts department. Is this a good time to discuss your account?";
+            } else if (isWellbeingAgent) {
+                greetingText = this.config.wellbeingOutboundGreeting || "Hello, this is Emma calling to check in on you. I hope this is a good time. How have you been feeling lately?";
             } else {
                 greetingText = this.config.outboundGreeting || "Hello! This is Sophie calling from Deepcut Garage. I hope I'm not catching you at a bad time.";
             }
@@ -326,6 +355,8 @@ export class ARIHandler extends EventEmitter {
             // Inbound call greeting (default)
             if (isAccountsAgent) {
                 greetingText = this.config.accountsInboundGreeting || "Hello, thank you for calling Deepcut Garage accounts department. This is Alex, your AI accounts assistant. How can I help you with your account today?";
+            } else if (isWellbeingAgent) {
+                greetingText = this.config.wellbeingInboundGreeting || "Hello, this is Emma. Thank you for calling. I'm here to support you and check in on how you're doing. How are you feeling today?";
             } else {
                 greetingText = this.config.inboundGreeting || "Hello, thank you for calling Deepcut Garage. This is Sophie, your AI assistant. How can I help you today?";
             }
@@ -402,6 +433,41 @@ export class ARIHandler extends EventEmitter {
                 return;
             }
 
+            // Handle interruptions - when user starts speaking, cancel ongoing response
+            if (message.type === 'input_audio_buffer.speech_started') {
+                console.log(`🎤 User started speaking on ${callId}`);
+                const session = this.openAiSessions.get(callId);
+                if (session && session.ws && session.ws.readyState === 1) {
+                    // Only cancel if there's an active response
+                    if (session.hasActiveResponse) {
+                        session.ws.send(JSON.stringify({
+                            type: 'response.cancel'
+                        }));
+                        console.log(`⏸️  Cancelled active response for interruption on ${callId}`);
+                        session.hasActiveResponse = false;
+                    }
+
+                    // Always clear the RTP audio queue to stop playback immediately
+                    const callData = this.activeCalls.get(callId);
+                    if (callData && callData.externalMediaId) {
+                        this.emit('clear-audio-queue', callData.externalMediaId);
+                    }
+                }
+                return;
+            }
+
+            // Log when speech ends (for debugging)
+            if (message.type === 'input_audio_buffer.speech_stopped') {
+                console.log(`🔇 User stopped speaking on ${callId}`);
+                return;
+            }
+
+            // Handle when a response gets cancelled
+            if (message.type === 'response.cancelled') {
+                console.log(`🚫 Response cancelled for ${callId} (likely due to interruption)`);
+                return;
+            }
+
             if (message.type === 'response.done') {
                 console.log(`🔍 Response details for ${callId}:`, JSON.stringify({
                     id: message.response?.id,
@@ -418,6 +484,10 @@ export class ARIHandler extends EventEmitter {
                 }
                 
                 const session = this.openAiSessions.get(callId);
+                // Clear active response flag
+                if (session) {
+                    session.hasActiveResponse = false;
+                }
                 if (session && !session.vadEnabled) {
                     console.log('🎙️ Enabling server VAD for conversation...');
                     session.ws.send(JSON.stringify({
@@ -465,6 +535,11 @@ export class ARIHandler extends EventEmitter {
 
             // Forward audio to caller
             if (message.type === 'response.audio.delta' && message.delta) {
+                // Track that we have an active response
+                const session = this.openAiSessions.get(callId);
+                if (session) {
+                    session.hasActiveResponse = true;
+                }
                 // Debug: log first audio delta
                 if (!this._audioDeltaLogged) {
                     this._audioDeltaLogged = true;
@@ -507,15 +582,21 @@ export class ARIHandler extends EventEmitter {
                             if (textToCheck) {
                                 const text = textToCheck.toLowerCase();
 
-                                // Comprehensive goodbye detection
-                                const goodbyePhrases = [
-                                    'goodbye', 'good bye', 'bye',
-                                    'have a great day', 'have a good day',
-                                    'take care', 'talk to you later',
-                                    'thanks for calling', 'thank you for calling'
-                                ];
+                                // Smarter goodbye detection - check for actual closing phrases
+                                // Exclude false positives like "take care of yourself" (health question)
+                                const hasGoodbye =
+                                    text.includes('goodbye') ||
+                                    text.includes('good bye') ||
+                                    text.match(/bye/) || // word boundary to avoid "maybe"
+                                    text.includes('have a great day') ||
+                                    text.includes('have a good day') ||
+                                    text.includes('talk to you later') ||
+                                    text.includes('thanks for calling') ||
+                                    text.includes('thank you for calling') ||
+                                    // Only detect "take care" if NOT followed by "of"
+                                    (text.includes('take care') && !text.includes('take care of'));
 
-                                if (goodbyePhrases.some(phrase => text.includes(phrase))) {
+                                if (hasGoodbye) {
                                     hasGoodbyeMessage = true;
                                     console.log(`      👋 DETECTED GOODBYE IN ${content.type.toUpperCase()}: "${textToCheck.substring(0, 100)}..."`);
                                 }
@@ -698,8 +779,11 @@ export class ARIHandler extends EventEmitter {
 
             this.emit('call-ended', {
                 callId,
+                channelId: callId,
                 callerNumber: callData.callerNumber,
-                duration
+                duration,
+                direction: callData.direction,
+                agentType: callData.agentType
             });
 
         } catch (error) {

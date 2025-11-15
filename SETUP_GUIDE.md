@@ -280,7 +280,7 @@ Contents:
 
 ```ini
 [Unit]
-Description=FreePBX OpenAI Voice Assistant
+Description=FreePBX Voice Assistant
 After=network.target
 
 [Service]

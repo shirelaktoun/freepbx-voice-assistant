@@ -53,6 +53,7 @@ const {
     SERVER_PORT = 3000,
     WEBHOOK_URL,
     MAKE_WEBHOOK_URL,
+    WELLNESS_WEBHOOK_URL = 'https://hook.eu2.make.com/c5gg8s6no99siar8xm4i8o4jphgljum5',
     // ARI Configuration
     ARI_HOST,
     ARI_PORT = 8088,
@@ -174,6 +175,185 @@ CRITICAL CALL ENDING PROTOCOL - YOU MUST FOLLOW THIS EXACTLY:
 5. The end_call function is the ONLY way to properly terminate a call
 
 If a caller asks to speak with a human accounts specialist or if you encounter a complex billing issue, use the transfer_to_human function to connect them.`;
+// Emma - Wellbeing Companion Configuration
+const WELLBEING_SYSTEM_MESSAGE = `You are Emma, a caring and wise female AI companion for wellbeing support. You speak with the gentle authority and soothing warmth of a trusted mentor. You are able to make and receive phone calls to check on the caller's mental, emotional, and physical wellbeing. Your presence is reassuring, calm, and supportive—guiding others with compassion and clear wisdom.
+
+During calls:
+- Begin with a gentle, nurturing greeting using the person's name if available, inviting them to share how they are feeling today.
+- Listen with patience and understanding, making the caller feel truly heard and valued.
+- Ask thoughtful, open-ended questions that encourage reflection on their mental and physical health (such as: "How has your mood been recently? Are you getting enough rest and nourishment? Are you finding time to relax or connect with others?").
+- If the caller shares worries, stress, or sadness, respond with empathy, acknowledge their emotions, and offer gentle guidance—suggesting mindful breathing, quiet moments, journaling, or seeking connection.
+- For any physical discomfort mentioned, ask considerate questions about their experience. Share simple health reminders (hydration, restful breaks, nutritious food) and always encourage consulting a healthcare professional for anything serious.
+- Offer brief, holistic wellbeing tips rooted in kindness—such as gentle stretches, positive affirmations, or small routines to brighten their day.
+- Keep your tone poised, calm, and quietly encouraging—always respectful, never judgmental.
+- When answering questions, provide clear, honest, and practical advice drawn from wellness best practices.
+- Close each call with heartfelt encouragement and a positive intention or gentle challenge for the day (e.g., "Maybe today, find a moment just for yourself—however small. I'm always here if you'd like to talk again.").
+
+Voice and Persona:
+- Female, with a soft, soothing, and confident voice
+- Projects wisdom and calm, like a trusted mentor or coach
+- Caring and non-intrusive—fosters self-trust and resilience
+- Avoid diagnosing, making medical claims, or giving direct instructions; focus on nurturing, empowering, and supporting the caller's wellbeing
+
+Main Objectives:
+1. Check in on mental and physical health through calm, gentle conversation.
+2. Inspire confidence and self-care through kind mentorship.
+3. Reinforce positive habits with warmth and guidance.
+4. Foster a sense of comfort, trust, and personal growth.
+5. Always respect the caller's privacy, autonomy, and emotional boundaries.
+
+CRITICAL WELLBEING ASSESSMENT AND CALL ENDING PROTOCOL:
+
+MANDATORY STEPS WHEN ENDING ANY CALL (YOU MUST FOLLOW THIS EXACT SEQUENCE):
+
+1. After supporting the caller, ALWAYS ask: "Is there anything else on your mind today that you'd like to talk about?"
+
+2. When the caller indicates they're done (says "no", "that's all", "goodbye", "bye", "nothing else", etc.), YOU MUST IMMEDIATELY:
+
+   STEP 1: Call log_wellbeing_check function with ALL of these parameters:
+   - caller_phone: The caller's phone number (REQUIRED)
+   - caller_name: Their name if provided (use "unknown" if not provided)
+   - mood_assessment: Their overall mood - MUST be one of: positive, neutral, stressed, anxious, sad, struggling
+   - physical_concerns: Any physical health issues mentioned (or "none" if not discussed)
+   - mental_concerns: Any mental or emotional concerns discussed (or "none" if not discussed)
+   - support_provided: Brief summary of the guidance and tips you offered
+   - follow_up_needed: true if they would benefit from follow-up, false otherwise
+   - notes: 1-2 sentence summary of key conversation points
+
+   STEP 2: Wait for log_wellbeing_check to complete
+
+   STEP 3: Say your warm goodbye: "Thank you for sharing with me today. Remember to be kind to yourself. I'm here whenever you need. Take care, and goodbye."
+
+   STEP 4: Call end_call function to disconnect - THIS IS MANDATORY
+
+WARNING: You MUST call log_wellbeing_check BEFORE saying goodbye. This is NOT optional. Every call must be logged.
+WARNING: You MUST call end_call to disconnect - do NOT just say goodbye without calling the function.
+WARNING: The sequence is: log_wellbeing_check → goodbye message → end_call
+
+If a caller asks to speak with someone else or if you encounter a situation requiring professional help, use the transfer_to_human function to connect them.`;
+
+// Emma's Tools
+const WELLBEING_TOOLS = [
+    {
+        type: 'function',
+        name: 'log_wellbeing_check',
+        description: 'Log a wellbeing check-in with notes about the caller\'s mental, emotional, or physical state',
+        parameters: {
+            type: 'object',
+            properties: {
+                caller_name: {
+                    type: 'string',
+                    description: 'Caller\'s name if provided'
+                },
+                caller_phone: {
+                    type: 'string',
+                    description: 'Caller\'s phone number'
+                },
+                mood_assessment: {
+                    type: 'string',
+                    enum: ['positive', 'neutral', 'stressed', 'anxious', 'sad', 'struggling'],
+                    description: 'Overall mood or emotional state'
+                },
+                physical_concerns: {
+                    type: 'string',
+                    description: 'Any physical health concerns mentioned (if any)'
+                },
+                mental_concerns: {
+                    type: 'string',
+                    description: 'Any mental or emotional concerns mentioned (if any)'
+                },
+                support_provided: {
+                    type: 'string',
+                    description: 'Summary of guidance, tips, or support offered during the call'
+                },
+                follow_up_needed: {
+                    type: 'boolean',
+                    description: 'Whether a follow-up call might be beneficial'
+                },
+                notes: {
+                    type: 'string',
+                    description: 'Additional notes about the conversation'
+                }
+            },
+            required: ['caller_phone', 'mood_assessment']
+        }
+    },
+    {
+        type: 'function',
+        name: 'schedule_wellbeing_callback',
+        description: 'Schedule a follow-up wellbeing check call',
+        parameters: {
+            type: 'object',
+            properties: {
+                caller_name: {
+                    type: 'string',
+                    description: 'Caller\'s name'
+                },
+                caller_phone: {
+                    type: 'string',
+                    description: 'Phone number for callback'
+                },
+                preferred_date: {
+                    type: 'string',
+                    description: 'Preferred date for callback in YYYY-MM-DD format'
+                },
+                preferred_time: {
+                    type: 'string',
+                    description: 'Preferred time for callback (morning, afternoon, evening)'
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Reason for follow-up (e.g., "Check on stress levels", "Follow up on sleep improvements")'
+                }
+            },
+            required: ['caller_phone', 'reason']
+        }
+    },
+    {
+        type: 'function',
+        name: 'transfer_to_human',
+        description: 'Transfer to a human counselor or healthcare professional when needed',
+        parameters: {
+            type: 'object',
+            properties: {
+                reason: {
+                    type: 'string',
+                    description: 'Reason for transfer (e.g., crisis situation, professional help needed, caller preference)'
+                },
+                urgency: {
+                    type: 'string',
+                    enum: ['routine', 'important', 'urgent'],
+                    description: 'Urgency level of the transfer'
+                }
+            },
+            required: ['reason']
+        }
+    },
+    {
+        type: 'function',
+        name: 'end_call',
+        description: 'End the call gracefully when the conversation is complete and caller has no more concerns to discuss. Always ask if there\'s anything else before ending.',
+        parameters: {
+            type: 'object',
+            properties: {
+                reason: {
+                    type: 'string',
+                    description: 'Summary of the call (e.g., "Wellbeing check completed - caller feeling supported", "Provided stress management guidance")'
+                },
+                caller_satisfied: {
+                    type: 'boolean',
+                    description: 'Whether the caller seems supported and satisfied'
+                }
+            },
+            required: ['reason']
+        }
+    }
+];
+
+// Emma's Greetings
+const WELLBEING_INBOUND_GREETING = 'Hello, this is Emma. Thank you for calling. I\'m here to support you and check in on how you\'re doing. How are you feeling today?';
+const WELLBEING_OUTBOUND_GREETING = 'Hello, this is Emma calling to check in on you. I hope this is a good time. How have you been feeling lately?';
+
 
 const VOICE = 'shimmer';
 const LOG_EVENT_TYPES = [
@@ -528,6 +708,9 @@ const costTracking = {
     }
 };
 
+// Wellness assessment data storage (for Emma calls)
+const wellnessAssessments = new Map(); // callId -> wellness assessment data
+
 // Cost constants (GPT-4o Mini Realtime API pricing)
 // Prices in USD, converted to GBP at ~0.79 exchange rate
 const USD_TO_GBP = 0.79; // Update this rate as needed
@@ -815,7 +998,12 @@ async function initializeARI() {
             accountsSystemMessage: ACCOUNTS_SYSTEM_MESSAGE,
             accountsTools: ACCOUNTS_TOOLS,
             accountsInboundGreeting: ACCOUNTS_INBOUND_GREETING,
-            accountsOutboundGreeting: ACCOUNTS_OUTBOUND_GREETING
+            accountsOutboundGreeting: ACCOUNTS_OUTBOUND_GREETING,
+            // Wellbeing Agent (Emma)
+            wellbeingSystemMessage: WELLBEING_SYSTEM_MESSAGE,
+            wellbeingTools: WELLBEING_TOOLS,
+            wellbeingInboundGreeting: WELLBEING_INBOUND_GREETING,
+            wellbeingOutboundGreeting: WELLBEING_OUTBOUND_GREETING
         });
 
         // Connect to ARI
@@ -866,6 +1054,13 @@ function setupARIEventHandlers() {
             rtpHandler.sendRTPPacket(callId, audio);
         } else {
             console.error('❌ RTP handler not available!');
+        }
+    });
+
+    // Clear audio queue when user interrupts
+    ariHandler.on('clear-audio-queue', (callId) => {
+        if (rtpHandler) {
+            rtpHandler.clearAudioQueue(callId);
         }
     });
 
@@ -960,7 +1155,8 @@ function setupARIEventHandlers() {
                 action: {},
                 transfer: {},
                 system: {
-                    assistant_name: 'Sophie',
+                    assistant_name: getAssistantName(info.agentType),
+                    agent_type: info.agentType,
                     app_version: '2.0'
                 }
             };
@@ -970,6 +1166,13 @@ function setupARIEventHandlers() {
 
     ariHandler.on('call-ended', async (info) => {
         console.log('📵 Call ended:', info.callerNumber || 'Unknown', `Duration: ${info.duration}s`);
+
+        // Send wellness evaluation if this was an Emma call
+        if (info.agentType === 'wellbeing') {
+            const wellnessData = wellnessAssessments.get(info.channelId);
+            await sendWellnessEvaluation(info.channelId, info, wellnessData);
+            wellnessAssessments.delete(info.channelId); // Clean up
+        }
 
         // Calculate and track costs
         const callCost = calculateCallCost(info.duration || 0);
@@ -1007,7 +1210,8 @@ function setupARIEventHandlers() {
             action: {},
             transfer: {},
             system: {
-                assistant_name: 'Sophie',
+                assistant_name: getAssistantName(info.agentType),
+                agent_type: info.agentType,
                 app_version: '2.0'
             }
         };
@@ -1049,7 +1253,8 @@ function setupARIEventHandlers() {
                 reason: info.reason || ''
             },
             system: {
-                assistant_name: 'Sophie',
+                assistant_name: getAssistantName(info.agentType),
+                agent_type: info.agentType,
                 app_version: '2.0'
             }
         };
@@ -1316,6 +1521,20 @@ async function sendCallRegisterWebhook(payload) {
 }
 
 /**
+ * Get assistant name based on agent type
+ * @param {string} agentType - The agent type (wellbeing, accounts, service)
+ * @returns {string} The assistant's name
+ */
+function getAssistantName(agentType) {
+    switch(agentType) {
+        case 'wellbeing': return 'Emma';
+        case 'accounts': return 'Alex';
+        case 'service':
+        default: return 'Sophie';
+    }
+}
+
+/**
  * Build standardized call data object
  * @param {string} callId - Call ID
  * @param {Object} callData - Call data from activeCalls map
@@ -1425,6 +1644,13 @@ async function handleFunctionCall(functionCall, callId = null) {
                 break;
             case 'get_payment_history':
                 result = await handleGetPaymentHistory(args, callId);
+                break;
+            // Wellness Agent (Emma) functions
+            case 'log_wellbeing_check':
+                result = await handleLogWellbeingCheck(args, callId);
+                break;
+            case 'schedule_wellbeing_callback':
+                result = await handleScheduleWellbeingCallback(args, callId);
                 break;
             default:
                 result = `I'm not familiar with that function. How else can I help you?`;
@@ -1916,6 +2142,141 @@ async function handleGetPaymentHistory(args, callId = null) {
 
 // ============================================================
 // HTTP Routes
+
+// ============================================================
+// Emma (Wellness Agent) Function Handlers
+// ============================================================
+
+async function handleLogWellbeingCheck(args, callId = null) {
+    console.log('⚙️ handleLogWellbeingCheck called for call', callId);
+    console.log('Wellness check data:', args);
+
+    // Store wellness assessment for later webhook
+    if (callId) {
+        wellnessAssessments.set(callId, {
+            caller_phone: args.caller_phone,
+            caller_name: args.caller_name,
+            mood_assessment: args.mood_assessment,
+            physical_concerns: args.physical_concerns || null,
+            mental_concerns: args.mental_concerns || null,
+            support_provided: args.support_provided || null,
+            follow_up_needed: args.follow_up_needed || false,
+            notes: args.notes || null,
+            logged_at: new Date().toISOString()
+        });
+
+        console.log(`✅ Wellness assessment stored for ${callId}`);
+        console.log(`   Mood: ${args.mood_assessment}`);
+        console.log(`   Follow-up needed: ${args.follow_up_needed}`);
+    }
+
+    return `Thank you for sharing. I've made a note of our conversation${args.follow_up_needed ? ' and will schedule a follow-up check-in' : ''}.`;
+}
+
+async function handleScheduleWellbeingCallback(args, callId = null) {
+    console.log('⚙️ Scheduling wellness callback:', args);
+
+    // Get call data
+    const callData = callId && ariHandler ? ariHandler.getCallInfo(callId) : null;
+
+    // Build webhook payload for callback scheduling
+    const webhookPayload = {
+        event_type: 'wellbeing_callback',
+        timestamp: new Date().toISOString(),
+        call: callData ? buildCallData(callId, callData, false) : {
+            call_id: '',
+            direction: 'unknown',
+            caller_number: args.caller_phone || '',
+            caller_name: args.caller_name || '',
+            start_time: '',
+            end_time: null,
+            duration_seconds: null
+        },
+        action: {
+            type: 'wellbeing_callback',
+            details: {
+                caller_name: args.caller_name || '',
+                caller_phone: args.caller_phone,
+                preferred_date: args.preferred_date || null,
+                preferred_time: args.preferred_time || null,
+                reason: args.reason,
+                priority: args.priority || 'normal'
+            }
+        },
+        system: {
+            assistant_name: 'Emma',
+            agent_type: 'wellbeing',
+            app_version: '2.0'
+        }
+    };
+
+    await sendCallRegisterWebhook(webhookPayload);
+
+    return `I've scheduled a wellness check-in call${args.preferred_date ? ` for ${args.preferred_date}` : ''}. I'll reach out to ${args.caller_phone} to ${args.reason}. Take care of yourself until then.`;
+}
+
+// Send wellness evaluation webhook at end of Emma calls
+async function sendWellnessEvaluation(callId, callInfo, wellnessData) {
+    if (!WELLNESS_WEBHOOK_URL) {
+        console.log('⚠️  WELLNESS_WEBHOOK_URL not configured');
+        return;
+    }
+
+    try {
+        const evaluation = {
+            // Call Information
+            call_id: callId,
+            caller_phone: callInfo.callerNumber || wellnessData?.caller_phone || 'unknown',
+            caller_name: wellnessData?.caller_name || null,
+            call_date: new Date().toISOString(),
+            call_duration: callInfo.duration || 0,
+            call_direction: callInfo.direction || 'inbound',
+
+            // Wellness Assessment
+            mood_assessment: wellnessData?.mood_assessment || 'not_assessed',
+            emotional_state: wellnessData?.mental_concerns || null,
+            physical_concerns: wellnessData?.physical_concerns || null,
+            mental_concerns: wellnessData?.mental_concerns || null,
+
+            // Conversation Analysis
+            support_provided: wellnessData?.support_provided || null,
+            conversation_notes: wellnessData?.notes || null,
+
+            // Follow-up & Actions
+            follow_up_needed: wellnessData?.follow_up_needed || false,
+            follow_up_reason: wellnessData?.follow_up_needed ? (wellnessData?.notes || 'Follow-up recommended') : null,
+
+            // Call Outcome
+            call_completed_normally: true,
+            assessment_completed: !!wellnessData,
+
+            // Metadata
+            agent: 'Emma',
+            agent_type: 'wellbeing',
+            timestamp: new Date().toISOString()
+        };
+
+        console.log('📤 Sending wellness evaluation:', evaluation.caller_phone, '-', evaluation.mood_assessment);
+
+        const response = await fetch(WELLNESS_WEBHOOK_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(evaluation)
+        });
+
+        if (response.ok) {
+            console.log('✅ Wellness evaluation sent successfully to Make.com');
+        } else {
+            const errorText = await response.text();
+            console.error(`❌ Failed to send wellness evaluation: ${response.status} ${errorText}`);
+        }
+    } catch (error) {
+        console.error('❌ Error sending wellness evaluation:', error.message);
+    }
+}
+
 // ============================================================
 
 // Health check
