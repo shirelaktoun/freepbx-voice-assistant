@@ -99,12 +99,16 @@ export class ARIHandler extends EventEmitter {
         // Determine which agent to use based on event args
         const isAccountsAgent = event.args && event.args.includes('accounts');
         const isWellbeingAgent = event.args && event.args.includes('wellbeing');
+        const isTurkishWellbeingAgent = event.args && event.args.includes('wellbeing_tr');
         let agentType = 'service';  // default
         let agentName = 'Sophie (Service)';  // default
 
         if (isAccountsAgent) {
             agentType = 'accounts';
             agentName = 'Alex (Accounts)';
+        } else if (isTurkishWellbeingAgent) {
+            agentType = 'wellbeing_tr';
+            agentName = 'Yeliz (Turkish Wellbeing)';
         } else if (isWellbeingAgent) {
             agentType = 'wellbeing';
             agentName = 'Emma (Wellbeing)';
@@ -291,6 +295,7 @@ export class ARIHandler extends EventEmitter {
         const agentType = callData?.agentType || 'service';
         const isAccountsAgent = agentType === 'accounts';
         const isWellbeingAgent = agentType === 'wellbeing';
+        const isTurkishWellbeingAgent = agentType === 'wellbeing_tr';
 
         // Select appropriate configuration based on agent type
         let systemMessage, tools, agentName;
@@ -299,6 +304,10 @@ export class ARIHandler extends EventEmitter {
             systemMessage = this.config.accountsSystemMessage;
             tools = this.config.accountsTools;
             agentName = 'Alex (Accounts)';
+        } else if (isTurkishWellbeingAgent) {
+            systemMessage = this.config.wellbeingTurkishSystemMessage;
+            tools = this.config.wellbeingTools;  // Same tools, Turkish instructions
+            agentName = 'Yeliz (Turkish Wellbeing)';
         } else if (isWellbeingAgent) {
             systemMessage = this.config.wellbeingSystemMessage;
             tools = this.config.wellbeingTools;
@@ -345,6 +354,8 @@ export class ARIHandler extends EventEmitter {
             // Outbound call greeting
             if (isAccountsAgent) {
                 greetingText = this.config.accountsOutboundGreeting || "Hello! This is Alex calling from Deepcut Garage accounts department. Is this a good time to discuss your account?";
+            } else if (isTurkishWellbeingAgent) {
+                greetingText = this.config.wellbeingTurkishOutboundGreeting || "Merhaba, ben Yeliz. Sizi kontrol etmek için arıyorum. Umarım uygun bir zamandır. Son zamanlarda kendinizi nasıl hissediyorsunuz?";
             } else if (isWellbeingAgent) {
                 greetingText = this.config.wellbeingOutboundGreeting || "Hello, this is Emma calling to check in on you. I hope this is a good time. How have you been feeling lately?";
             } else {
@@ -355,6 +366,8 @@ export class ARIHandler extends EventEmitter {
             // Inbound call greeting (default)
             if (isAccountsAgent) {
                 greetingText = this.config.accountsInboundGreeting || "Hello, thank you for calling Deepcut Garage accounts department. This is Alex, your AI accounts assistant. How can I help you with your account today?";
+            } else if (isTurkishWellbeingAgent) {
+                greetingText = this.config.wellbeingTurkishInboundGreeting || "Merhaba, ben Yeliz. Aramayı için teşekkür ederim. Sizi desteklemek ve nasıl olduğunuzu kontrol etmek için buradayım. Bugün kendinizi nasıl hissediyorsunuz?";
             } else if (isWellbeingAgent) {
                 greetingText = this.config.wellbeingInboundGreeting || "Hello, this is Emma. Thank you for calling. I'm here to support you and check in on how you're doing. How are you feeling today?";
             } else {
