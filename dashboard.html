@@ -461,6 +461,15 @@
         <div id="calls" class="tab-content">
             <div class="card">
                 <h2>Make Outbound Call</h2>
+                <div style="margin-bottom: 12px;">
+                    <label for="agentSelect" style="display: block; margin-bottom: 8px; color: #666; font-size: 14px; font-weight: 500;">Select Agent:</label>
+                    <select id="agentSelect" style="width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; margin-bottom: 12px;">
+                        <option value="service">Sophie - Service Agent (English)</option>
+                        <option value="accounts">Alex - Accounts Agent (English)</option>
+                        <option value="wellbeing">Emma - Wellbeing Agent (English)</option>
+                        <option value="wellbeing_tr">Yeliz - Wellbeing Agent (Turkish)</option>
+                    </select>
+                </div>
                 <div class="input-group">
                     <input type="text" id="phoneNumber" placeholder="Enter phone number or extension (e.g., 1003)">
                     <button class="btn-success" onclick="makeCall()">Call</button>
@@ -830,17 +839,40 @@
 
         async function makeCall() {
             const phoneNumber = document.getElementById('phoneNumber').value.trim();
+            const agentType = document.getElementById('agentSelect').value;
+
             if (!phoneNumber) {
                 alert('Please enter a phone number');
                 return;
             }
 
+            const agentNames = {
+                'service': 'Sophie (Service)',
+                'accounts': 'Alex (Accounts)',
+                'wellbeing': 'Emma (Wellbeing)',
+                'wellbeing_tr': 'Yeliz (Turkish Wellbeing)'
+            };
+
+            // Map agent types to their extensions
+            const agentCallerIds = {
+                'service': '1000',        // Sophie
+                'accounts': '1005',       // Alex
+                'wellbeing': '3000',      // Emma
+                'wellbeing_tr': '3001'    // Yeliz
+            };
+
+            const callerId = agentCallerIds[agentType] || '1000';
+
             try {
-                log('Initiating call to ' + phoneNumber + '...', 'info');
+                log('Initiating call to ' + phoneNumber + ' using ' + agentNames[agentType] + ' (from ext ' + callerId + ')...', 'info');
                 const res = await fetch('/ari/originate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ destination: phoneNumber, callerId: '1000' })
+                    body: JSON.stringify({
+                        destination: phoneNumber,
+                        callerId: callerId,
+                        agentType: agentType
+                    })
                 });
 
                 const result = await res.json();
