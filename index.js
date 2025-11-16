@@ -2416,7 +2416,7 @@ fastify.post('/ari/originate', async (request, reply) => {
 
         const result = await ariHandler.makeOutboundCall({
             destination,
-            context: context || 'from-internal',
+            context: context || 'outbound-allroutes',  // Bypass bad-number context
             callerId: callerId || SIP_EXTENSION,
             variables: variables || {},
             agentType: agent
