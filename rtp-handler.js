@@ -1,11 +1,13 @@
 /**
  * RTP Handler
  * Manages RTP audio streams between Asterisk and OpenAI
- * Uses g711_ulaw (8kHz) format - no conversion needed
+Converts between Asterisk ulaw 8kHz and OpenAI pcm16 24kHz
  */
 
 import dgram from 'dgram';
 import { EventEmitter } from 'events';
+import pcmResampler from 'pcm-resampler';
+const { Pcm16Resampler } = pcmResampler;
 
 export class RTPHandler extends EventEmitter {
     constructor(config) {
@@ -16,6 +18,18 @@ export class RTPHandler extends EventEmitter {
         this.packetQueues = new Map(); // callId -> array of packets to send
         this.queueTimers = new Map(); // callId -> timer handle
         this.keepaliveTimers = new Map(); // callId -> keepalive timer handle
+        
+        // Audio conversion: ulaw 8kHz <-> pcm16 24kHz
+        this.resamplerUp = new Pcm16Resampler({
+            sourceSampleRate: 8000,
+            targetSampleRate: 24000,
+            channels: 1
+        });
+        this.resamplerDown = new Pcm16Resampler({
+            sourceSampleRate: 24000,
+            targetSampleRate: 8000,
+            channels: 1
+        });
     }
 
     /**
@@ -90,10 +104,16 @@ export class RTPHandler extends EventEmitter {
                     session.pendingAudio = [];
                 }
 
-                // Asterisk sends ulaw (8kHz), convert to base64 for OpenAI
+                // Asterisk sends ulaw (8kHz), convert to pcm16 24kHz for OpenAI
                 const headerLength = 12 + ((packet[0] & 0x0F) * 4);
-                const audioPayload = packet.slice(headerLength);
-                const openAIAudio = audioPayload.toString('base64');
+                const ulawPayload = packet.slice(headerLength);
+                
+                // Convert ulaw 8kHz -> pcm16 8kHz -> pcm16 24kHz
+                const pcm8k = this.ulawToPcm16(ulawPayload);
+                const pcm24k = this.resamplerUp.resample(pcm8k);
+                
+                // Send as base64 to OpenAI
+                const openAIAudio = pcm24k.toString
                 
                 this.emit('audio', {
                     callId: session.callId,
@@ -128,8 +148,12 @@ export class RTPHandler extends EventEmitter {
         }
 
         try {
-            // OpenAI sends g711_ulaw (8kHz) as base64
-            const asteriskAudio = Buffer.from(audioBase64, 'base64');
+            // OpenAI sends pcm16 24kHz as base64, convert to ulaw 8kHz for Asterisk
+            const pcm24k = Buffer.from(audioBase64, 'base64');
+            
+            // Convert pcm16 24kHz -> pcm16 8kHz -> ulaw 8kHz
+            const pcm8k = this.resamplerDown.resample(pcm24k);
+            const asteriskAudio = this.pcm16ToUlaw(pcm8k);
 
             // Split large audio chunks into proper RTP packet sizes
             const PACKET_SIZE = 160; // 160 bytes = 20ms at 8kHz
@@ -351,6 +375,35 @@ export class RTPHandler extends EventEmitter {
     }
 
     // --- Utility functions for audio conversion ---
+
+    /**
+     * Converts 16-bit PCM buffer to 8-bit U-law buffer
+     */
+    /**
+     * Converts 8-bit U-law buffer to 16-bit PCM buffer
+     */
+    ulawToPcm16(ulawBuffer) {
+        const pcmBuffer = Buffer.alloc(ulawBuffer.length * 2);
+        for (let i = 0; i < ulawBuffer.length; i++) {
+            const sample = this.ulawToLinear(ulawBuffer[i]);
+            pcmBuffer.writeInt16LE(sample, i * 2);
+        }
+        return pcmBuffer;
+    }
+
+    /**
+     * μ-law decompression algorithm
+     */
+    ulawToLinear(ulaw) {
+        const BIAS = 0x84;
+        ulaw = ~ulaw;
+        const sign = (ulaw & 0x80) != 0;
+        const exponent = (ulaw >> 4) & 0x07;
+        const mantissa = ulaw & 0x0F;
+        let sample = ((mantissa << 3) + BIAS) << exponent;
+        sample -= BIAS;
+        return sign ? -sample : sample;
+    }
 
     /**
      * Converts 16-bit PCM buffer to 8-bit U-law buffer
