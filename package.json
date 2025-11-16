@@ -33,6 +33,7 @@
     "g711": "^1.0.1",
     "node-fetch": "^3.3.2",
     "pcm-resampler": "^1.2.4",
+    "wavefile": "^11.0.0",
     "ws": "^8.18.0"
   },
   "engines": {
