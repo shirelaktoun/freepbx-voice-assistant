@@ -2414,11 +2414,19 @@ fastify.post('/ari/originate', async (request, reply) => {
         };
         console.log(`📞 Initiating outbound call to: ${destination} using ${agentNames[agent]}`);
 
+        // Determine context based on destination
+        // Internal extensions: 3-5 digits (e.g., 7021, 1000, 3000)
+        // External numbers: Start with 0 or longer than 5 digits
+        let dialContext = context;
+        if (!dialContext) {
+            const isInternalExtension = /^[0-9]{3,5}$/.test(destination) && !destination.startsWith('0');
+            dialContext = isInternalExtension ? 'from-internal' : 'outbound-allroutes';
+            console.log(`   Auto-detected context: ${dialContext} (${isInternalExtension ? 'internal extension' : 'external number'})`);
+        }
+
         const result = await ariHandler.makeOutboundCall({
             destination,
-            context: context || 'outbound-allroutes',  // Bypass bad-number context
-            callerId: callerId || SIP_EXTENSION,
-            variables: variables || {},
+            context: dialContext,
             agentType: agent
         });
 
