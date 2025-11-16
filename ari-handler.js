@@ -333,8 +333,8 @@ export class ARIHandler extends EventEmitter {
             type: 'session.update',
             session: {
                 turn_detection: null,  // Disabled initially - enable after greeting
-                input_audio_format: 'pcm16',  // 24kHz PCM16 (high quality)
-                output_audio_format: 'pcm16',  // 24kHz PCM16 (high quality)
+                input_audio_format: 'g711_ulaw',  // 8kHz ulaw from Asterisk
+                output_audio_format: 'g711_ulaw', // 8kHz ulaw back to Asterisk
                 voice: voice,
                 instructions: systemMessage,
                 modalities: ['audio', 'text'],
@@ -344,7 +344,7 @@ export class ARIHandler extends EventEmitter {
         };
 
         openAiWs.send(JSON.stringify(sessionUpdate));
-        console.log('📤 Sent session configuration (using 24kHz pcm16 for high quality audio)');
+        console.log('📤 Sent session configuration (using 8kHz g711_ulaw)');
 
         console.log('✅ Session ready - sending greeting...');
 
