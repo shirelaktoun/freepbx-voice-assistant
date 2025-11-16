@@ -893,6 +893,7 @@ export class ARIHandler extends EventEmitter {
             // Prepare channel variables
             const channelVars = {
                 OUTBOUND_ASSISTANT: 'true',
+                AMPUSER: callerId || '1000',  // Set calling extension for FreePBX outbound routing
                 ...variables
             };
 
