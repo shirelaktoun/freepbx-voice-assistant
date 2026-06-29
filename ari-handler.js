@@ -176,7 +176,7 @@ export class ARIHandler extends EventEmitter {
                 format: 'ulaw', // 8kHz ulaw - this worked for internal calls
                 encapsulation: 'rtp',
                 transport: 'udp',
-                connection_type: 'server', // We run RTP server, Asterisk sends to us first
+                connection_type: 'client', // Asterisk connects to our RTP server
                 direction: 'both'
             });
             // console.log('🎙️ External media channel created:', externalMedia.id);
@@ -187,6 +187,19 @@ export class ARIHandler extends EventEmitter {
             }
 
             callData.externalMedia = externalMedia;
+
+            // Wait for external media channel to enter Stasis before adding to bridge
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Timeout waiting for external media Stasis')), 5000);
+                const onStasis = (ev, ch) => {
+                    if (ch.id === externalMedia.id) {
+                        this.ari.removeListener('StasisStart', onStasis);
+                        clearTimeout(timeout);
+                        resolve();
+                    }
+                };
+                this.ari.on('StasisStart', onStasis);
+            });
 
             // Add external media to bridge
             await bridge.addChannel({ channel: externalMedia.id });
@@ -239,11 +252,10 @@ export class ARIHandler extends EventEmitter {
             const callDirection = callData?.direction || 'inbound';
 
             const openAiWs = new WebSocket(
-                'wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview',
+                'wss://api.openai.com/v1/realtime?model=gpt-realtime-2',
                 {
                     headers: {
-                        'Authorization': `Bearer ${this.config.openaiApiKey}`,
-                        'OpenAI-Beta': 'realtime=v1'
+                        'Authorization': `Bearer ${this.config.openaiApiKey}`
                     }
                 }
             );
@@ -332,14 +344,20 @@ export class ARIHandler extends EventEmitter {
         const sessionUpdate = {
             type: 'session.update',
             session: {
-                turn_detection: null,  // Disabled initially - enable after greeting
-                input_audio_format: 'g711_ulaw',  // 8kHz ulaw from Asterisk
-                output_audio_format: 'g711_ulaw', // 8kHz ulaw back to Asterisk
-                voice: voice,
+                type: 'realtime',
                 instructions: systemMessage,
-                modalities: ['audio', 'text'],
-                temperature: 0.8,
-                tools: tools || []
+                output_modalities: ['audio'],
+                tools: tools || [],
+                audio: {
+                    input: {
+                        format: { type: 'audio/pcmu' },
+                        turn_detection: null
+                    },
+                    output: {
+                        format: { type: 'audio/pcmu' },
+                        voice: voice
+                    }
+                }
             }
         };
 
@@ -385,7 +403,7 @@ export class ARIHandler extends EventEmitter {
                 role: 'assistant',
                 content: [
                     {
-                        type: 'text',
+                        type: 'output_text',
                         text: greetingText
                     }
                 ]
@@ -397,9 +415,7 @@ export class ARIHandler extends EventEmitter {
         // The AI will speak the greeting and then STOP (not continue)
         const responseCreate = {
             type: 'response.create',
-            response: {
-                modalities: ['audio', 'text']
-            }
+            response: {}
         };
         openAiWs.send(JSON.stringify(responseCreate));
 
@@ -436,8 +452,7 @@ export class ARIHandler extends EventEmitter {
         try {
             const message = JSON.parse(data.toString());
             
-            // --- MODIFIED LINE: Added 'response.audio.delta' to the log filter ---
-            if (['session.created', 'response.done', 'error', 'response.audio.delta'].includes(message.type)) {
+            if (!['response.output_audio.delta', 'response.output_audio_transcript.delta'].includes(message.type)) {
                 console.log(`📩 OpenAI event for ${callId}:`, message.type);
             }
 
@@ -487,7 +502,7 @@ export class ARIHandler extends EventEmitter {
                     status: message.response?.status,
                     output_length: message.response?.output?.length,
                     modalities: message.response?.modalities,
-                    has_audio: message.response?.output?.some(o => o.type === 'audio'),
+                    has_audio: message.response?.output?.some(o => o.content?.some(c => c.type === 'output_audio')),
                     output_types: message.response?.output?.map(o => o.type)
                 }, null, 2));
 
@@ -506,11 +521,11 @@ export class ARIHandler extends EventEmitter {
                     session.ws.send(JSON.stringify({
                         type: 'session.update',
                         session: {
-                            turn_detection: { 
-                                type: 'server_vad',
-                                threshold: 0.5,
-                                prefix_padding_ms: 300,
-                                silence_duration_ms: 500
+                            type: 'realtime',
+                            audio: {
+                                input: {
+                                    turn_detection: { type: 'semantic_vad' }
+                                }
                             }
                         }
                     }));
@@ -547,13 +562,12 @@ export class ARIHandler extends EventEmitter {
             }
 
             // Forward audio to caller
-            if (message.type === 'response.audio.delta' && message.delta) {
+            if (message.type === 'response.output_audio.delta' && message.delta) {
                 // Track that we have an active response
                 const session = this.openAiSessions.get(callId);
                 if (session) {
                     session.hasActiveResponse = true;
                 }
-                // Debug: log first audio delta
                 if (!this._audioDeltaLogged) {
                     this._audioDeltaLogged = true;
                     console.log(`🎤 Received first audio delta from OpenAI for call ${callId}`);
@@ -739,11 +753,9 @@ export class ARIHandler extends EventEmitter {
 
             session.ws.send(JSON.stringify(response));
             
-            session.ws.send(JSON.stringify({ 
+            session.ws.send(JSON.stringify({
                 type: 'response.create',
-                response: {
-                    modalities: ['audio', 'text']
-                }
+                response: {}
             }));
             
             console.log('✅ Function result sent to OpenAI');

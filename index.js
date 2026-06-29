@@ -1392,10 +1392,9 @@ function startWebRealtimeSession(wsConnection) {
     
     let vadEnabled = false;  // Track if VAD has been enabled
     
-    const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
+    const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-realtime-2', {
         headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'OpenAI-Beta': 'realtime=v1'
+            'Authorization': `Bearer ${OPENAI_API_KEY}`
         }
     });
 
