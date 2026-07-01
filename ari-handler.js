@@ -902,10 +902,15 @@ export class ARIHandler extends EventEmitter {
             // Create the outbound channel using ARI originate
             const channel = this.ari.Channel();
 
+            // AMPUSER needs the bare extension digits for FreePBX's outbound CID
+            // lookup, whereas callerId may be a formatted "Name" <Ext> string.
+            const callerIdExtMatch = callerId && callerId.match(/<(\d+)>/);
+            const ampUser = callerIdExtMatch ? callerIdExtMatch[1] : (callerId || '1000');
+
             // Prepare channel variables
             const channelVars = {
                 OUTBOUND_ASSISTANT: 'true',
-                AMPUSER: callerId || '1000',  // Set calling extension for FreePBX outbound routing
+                AMPUSER: ampUser,  // Set calling extension for FreePBX outbound routing
                 ...variables
             };
 

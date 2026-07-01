@@ -769,15 +769,15 @@ const costTracking = {
 // Wellness assessment data storage (for Emma calls)
 const wellnessAssessments = new Map(); // callId -> wellness assessment data
 
-// Cost constants (GPT-4o Mini Realtime API pricing)
+// Cost constants (GPT-Realtime-2 pricing, updated 2026-07-01 after model migration)
 // Prices in USD, converted to GBP at ~0.79 exchange rate
 const USD_TO_GBP = 0.79; // Update this rate as needed
 const COSTS = {
-    AUDIO_INPUT_PER_TOKEN: (0.60 / 1_000_000) * USD_TO_GBP,  // £0.47 per 1M tokens
-    AUDIO_OUTPUT_PER_TOKEN: (2.40 / 1_000_000) * USD_TO_GBP, // £1.90 per 1M tokens
-    TEXT_PER_TOKEN: (0.60 / 1_000_000) * USD_TO_GBP,          // £0.47 per 1M tokens
-    TOKENS_PER_SECOND_INPUT: 25,              // ~1500 tokens per minute / 60
-    TOKENS_PER_SECOND_OUTPUT: 25,             // ~1500 tokens per minute / 60
+    AUDIO_INPUT_PER_TOKEN: (32 / 1_000_000) * USD_TO_GBP,     // £25.28 per 1M tokens
+    AUDIO_OUTPUT_PER_TOKEN: (64 / 1_000_000) * USD_TO_GBP,    // £50.56 per 1M tokens
+    TEXT_PER_TOKEN: (14 / 1_000_000) * USD_TO_GBP,            // £11.06 per 1M tokens (blended avg of $4 text-in / $24 text-out - function-call text is a small, unmeasured share of total cost so a blended rate is close enough)
+    TOKENS_PER_SECOND_INPUT: 10,               // user audio: 1 token per 100ms
+    TOKENS_PER_SECOND_OUTPUT: 20,              // assistant audio: 1 token per 50ms
     FUNCTION_CALL_TOKENS: 200,                // Average tokens per function call
     CURRENCY: 'GBP',
     CURRENCY_SYMBOL: '£'
@@ -1349,7 +1349,7 @@ fastify.register(async function (fastify) {
                 console.log('Received WebSocket message:', data.type);
                 
                 if (data.type === 'start_call') {
-                    openAiWs = startWebRealtimeSession(socket);
+                    openAiWs = startWebRealtimeSession(socket, data.agentType);
                 } else if (data.type === 'audio_data' && data.audio) {
                     if (openAiWs && openAiWs.readyState === 1) {
                         const audioAppend = {
@@ -1365,9 +1365,7 @@ fastify.register(async function (fastify) {
                         }));
                         openAiWs.send(JSON.stringify({
                             type: 'response.create',
-                            response: {
-                                modalities: ['audio', 'text']
-                            }
+                            response: {}
                         }));
                     }
                 }
@@ -1387,11 +1385,30 @@ fastify.register(async function (fastify) {
 
 // Start OpenAI Realtime Session for web interface
 // FIXED: Using correct OpenAI model name
-function startWebRealtimeSession(wsConnection) {
-    console.log('Starting OpenAI Realtime session for web client');
-    
-    let vadEnabled = false;  // Track if VAD has been enabled
-    
+function startWebRealtimeSession(wsConnection, agentType) {
+    console.log(`Starting OpenAI Realtime session for web client (agent: ${agentType || 'service'})`);
+
+    // Mirror the persona selection ari-handler.js uses for real phone calls
+    const isAccountsAgent = agentType === 'accounts';
+    const isWellbeingAgent = agentType === 'wellbeing';
+    const isTurkishWellbeingAgent = agentType === 'wellbeing_tr';
+
+    let systemMessage = SYSTEM_MESSAGE;
+    let tools = TOOLS;
+    if (isAccountsAgent) {
+        systemMessage = ACCOUNTS_SYSTEM_MESSAGE;
+        tools = ACCOUNTS_TOOLS;
+    } else if (isTurkishWellbeingAgent) {
+        systemMessage = WELLBEING_TURKISH_SYSTEM_MESSAGE;
+        tools = WELLBEING_TOOLS;
+    } else if (isWellbeingAgent) {
+        systemMessage = WELLBEING_SYSTEM_MESSAGE;
+        tools = WELLBEING_TOOLS;
+    }
+
+    const voice = isAccountsAgent ? 'echo' : 'shimmer';
+    console.log(`🎤 Selected voice: ${voice} (Agent type: ${agentType || 'service'})`);
+
     const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-realtime-2', {
         headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`
@@ -1400,19 +1417,25 @@ function startWebRealtimeSession(wsConnection) {
 
     openAiWs.on('open', () => {
         console.log('Connected to OpenAI Realtime API for web client');
-        
+
         // Configure session WITHOUT server_vad initially (for reliable greeting)
         const sessionUpdate = {
             type: 'session.update',
             session: {
-                turn_detection: null,  // Disabled initially
-                input_audio_format: 'pcm16',
-                output_audio_format: 'pcm16',
-                voice: VOICE,
-                instructions: SYSTEM_MESSAGE,
-                modalities: ['audio', 'text'],
-                temperature: 0.8,
-                tools: TOOLS
+                type: 'realtime',
+                instructions: systemMessage,
+                output_modalities: ['audio'],
+                tools: tools,
+                audio: {
+                    input: {
+                        format: { type: 'audio/pcm', rate: 24000 },
+                        turn_detection: null  // Disabled initially
+                    },
+                    output: {
+                        format: { type: 'audio/pcm', rate: 24000 },
+                        voice: voice
+                    }
+                }
             }
         };
 
@@ -1438,11 +1461,9 @@ function startWebRealtimeSession(wsConnection) {
         
         const responseCreate = {
             type: 'response.create',
-            response: {
-                modalities: ['audio', 'text']
-            }
+            response: {}
         };
-        
+
         console.log('📤 Requesting initial greeting with audio (manual mode)...');
         openAiWs.send(JSON.stringify(responseCreate));
     });
@@ -1475,22 +1496,20 @@ function startWebRealtimeSession(wsConnection) {
                     has_audio: response.response?.output?.some(o => o.type === 'audio'),
                     output_types: response.response?.output?.map(o => o.type)
                 }, null, 2));
-                
-                // Enable server_vad after initial greeting
-                if (!vadEnabled) {
-                    console.log('🎙️ Enabling server VAD for ongoing conversation...');
-                    openAiWs.send(JSON.stringify({
-                        type: 'session.update',
-                        session: {
-                            turn_detection: { type: 'server_vad' }
-                        }
-                    }));
-                    vadEnabled = true;
+
+                // Web dashboard uses manual hold-to-talk (commit_audio message),
+                // so turn_detection stays null for the whole session - no server_vad.
+
+                const transcript = response.response?.output
+                    ?.flatMap(o => o.content || [])
+                    ?.find(c => c.transcript)?.transcript;
+                if (transcript) {
+                    debugLog(`🐛 [web test] assistant said: "${transcript}"`);
                 }
             }
 
             // Forward relevant events to client
-            if (['response.audio.delta', 'response.audio.done', 'response.done', 'session.created'].includes(response.type)) {
+            if (['response.output_audio.delta', 'response.output_audio.done', 'response.done', 'session.created'].includes(response.type)) {
                 wsConnection.send(JSON.stringify(response));
             }
 
@@ -1508,23 +1527,33 @@ function startWebRealtimeSession(wsConnection) {
                 response.response.output.forEach(async item => {
                     if (item.type === 'function_call') {
                         const result = await handleFunctionCall(item);
-                        
+
+                        // The web test has no real phone channel to transfer, so
+                        // swap the transfer marker for an honest spoken explanation
+                        // instead of reading the raw JSON back to the caller.
+                        let output = result;
+                        if (result.result && result.result.__transfer) {
+                            output = {
+                                result: `I'd transfer you to that department, but live call transfers aren't available in this browser test tool - please call in on the phone line to reach a team member.`
+                            };
+                        }
+
+                        debugLog(`🐛 [web test] function_call_output for ${item.name} (call_id ${item.call_id}): ${JSON.stringify(output)}`);
+
                         // Send result back
                         const functionResponse = {
                             type: 'conversation.item.create',
                             item: {
                                 type: 'function_call_output',
                                 call_id: item.call_id,
-                                output: JSON.stringify(result)
+                                output: JSON.stringify(output)
                             }
                         };
 
                         openAiWs.send(JSON.stringify(functionResponse));
-                        openAiWs.send(JSON.stringify({ 
+                        openAiWs.send(JSON.stringify({
                             type: 'response.create',
-                            response: {
-                                modalities: ['audio', 'text']
-                            }
+                            response: {}
                         }));
                     }
                 });
@@ -2411,6 +2440,12 @@ fastify.post('/ari/originate', async (request, reply) => {
             'wellbeing': 'Emma',
             'wellbeing_tr': 'Yeliz'
         };
+        const agentExtensions = {
+            'service': '1000',
+            'accounts': '1005',
+            'wellbeing': '3000',
+            'wellbeing_tr': '3001'
+        };
         console.log(`📞 Initiating outbound call to: ${destination} using ${agentNames[agent]}`);
 
         // Determine context based on destination
@@ -2423,10 +2458,16 @@ fastify.post('/ari/originate', async (request, reply) => {
             console.log(`   Auto-detected context: ${dialContext} (${isInternalExtension ? 'internal extension' : 'external number'})`);
         }
 
+        // Default the presented CallerID to the agent's own extension so the
+        // receiving handset shows e.g. "Sophie" <1000> instead of falling
+        // back to the PBX host identity when nothing is set.
+        const outboundCallerId = callerId || `"${agentNames[agent]}" <${agentExtensions[agent]}>`;
+
         const result = await ariHandler.makeOutboundCall({
             destination,
             context: dialContext,
-            agentType: agent
+            agentType: agent,
+            callerId: outboundCallerId
         });
 
         return {
@@ -2519,6 +2560,29 @@ fastify.get('/diagnostics', async (request, reply) => {
     };
 });
 
+// Voice assistant activity log - real call events (function calls, transfers,
+// hangups) pulled from debug.log, for the dashboard's "Voice Assistant Log" tab
+fastify.get('/api/voice-logs', async (request, reply) => {
+    const limit = Math.min(parseInt(request.query.limit) || 200, 1000);
+    try {
+        const content = fs.readFileSync(DEBUG_LOG_FILE, 'utf8');
+        const lines = content.split('\n').filter(line => line.trim());
+        const recent = lines.slice(-limit);
+        const entries = recent.map(line => {
+            const match = line.match(/^\[([^\]]+)\]\s*(.*)$/);
+            return match
+                ? { timestamp: match[1], message: match[2] }
+                : { timestamp: null, message: line };
+        });
+        return { logs: entries };
+    } catch (error) {
+        return reply.code(500).send({
+            error: 'Failed to read voice assistant log',
+            message: error.message
+        });
+    }
+});
+
 // Cost analytics endpoint
 fastify.get('/api/costs', async (request, reply) => {
     const { period } = request.query; // 'hour', 'day', 'week', 'month', 'all'
@@ -2569,10 +2633,15 @@ fastify.get('/api/costs', async (request, reply) => {
         totals: costTracking.totals,
         recentCalls: filteredCalls.slice(-20).reverse(), // Last 20 calls
         pricing: {
+            model: 'gpt-realtime-2',
             audioInputPerToken: COSTS.AUDIO_INPUT_PER_TOKEN,
             audioOutputPerToken: COSTS.AUDIO_OUTPUT_PER_TOKEN,
             textPerToken: COSTS.TEXT_PER_TOKEN,
-            estimatedTokensPerSecond: COSTS.TOKENS_PER_SECOND_INPUT,
+            estimatedTokensPerSecondInput: COSTS.TOKENS_PER_SECOND_INPUT,
+            estimatedTokensPerSecondOutput: COSTS.TOKENS_PER_SECOND_OUTPUT,
+            audioInputPerMinute: COSTS.AUDIO_INPUT_PER_TOKEN * COSTS.TOKENS_PER_SECOND_INPUT * 60,
+            audioOutputPerMinute: COSTS.AUDIO_OUTPUT_PER_TOKEN * COSTS.TOKENS_PER_SECOND_OUTPUT * 60,
+            exchangeRateUsdToGbp: USD_TO_GBP,
             currency: COSTS.CURRENCY,
             currencySymbol: COSTS.CURRENCY_SYMBOL
         }

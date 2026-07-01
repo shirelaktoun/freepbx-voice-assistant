@@ -1,13 +1,12 @@
 #!/bin/bash
-PASSWORD="2024!Paris"
 
 echo "🔄 Restarting FreePBX Voice Assistant service..."
-echo "$PASSWORD" | sudo -S systemctl restart freepbx-voice.service
+sudo systemctl restart freepbx-voice.service
 sleep 2
 echo ""
 echo "✅ Service restarted!"
 echo ""
-echo "$PASSWORD" | sudo -S systemctl status freepbx-voice.service --no-pager -l | head -20
+sudo systemctl status freepbx-voice.service --no-pager -l | head -20
 echo ""
 echo "📝 To monitor logs in real-time:"
 echo "   ./view-logs.sh"
