@@ -470,13 +470,13 @@
                         this.log(`OpenAI session ready: ${data.session_id}`, 'success');
                         break;
                         
-                    case 'response.audio.delta':
+                    case 'response.output_audio.delta':
                         if (data.delta) {
                             this.playAudio(data.delta);
                         }
                         break;
-                        
-                    case 'response.audio.done':
+
+                    case 'response.output_audio.done':
                         this.log('Assistant finished speaking', 'info');
                         break;
                         
