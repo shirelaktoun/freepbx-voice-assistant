@@ -267,7 +267,10 @@ export class ARIHandler extends EventEmitter {
                 startTime: new Date(),
                 vadEnabled: false,
                 direction: callDirection,
-                hasActiveResponse: false
+                hasActiveResponse: false,
+                currentItemId: null,
+                currentItemAudioStartTime: null,
+                currentItemGeneratedMs: 0
             });
 
             // Set up OpenAI WebSocket handlers
@@ -334,10 +337,10 @@ export class ARIHandler extends EventEmitter {
 
         // Configure OpenAI to use g711_ulaw (8kHz)
         // This format worked for internal calls
-        // Select voice based on agent type: echo (male) for Alex, shimmer (female) for Sophie/Emma
-        let voice = 'shimmer';  // default for Sophie and Emma
+        // Select voice based on agent type: cedar (male) for Alex, marin (female) for Sophie/Emma/Yeliz
+        let voice = 'marin';  // default for Sophie, Emma, Yeliz
         if (isAccountsAgent) {
-            voice = 'echo';  // male voice for Alex
+            voice = 'cedar';  // male voice for Alex
         }
         console.log(`🎤 Selected voice: ${voice} (Agent type: ${agentType})`);
 
@@ -473,12 +476,30 @@ export class ARIHandler extends EventEmitter {
                         }));
                         console.log(`⏸️  Cancelled active response for interruption on ${callId}`);
                         session.hasActiveResponse = false;
+
+                        // Tell OpenAI to forget the part of its own reply that never
+                        // actually played, so it doesn't think the caller heard a
+                        // sentence it never finished (causes confusing follow-ups).
+                        if (session.currentItemId && session.currentItemAudioStartTime) {
+                            const elapsedMs = Date.now() - session.currentItemAudioStartTime;
+                            const audioEndMs = Math.round(Math.max(0, Math.min(elapsedMs, session.currentItemGeneratedMs)));
+                            session.ws.send(JSON.stringify({
+                                type: 'conversation.item.truncate',
+                                item_id: session.currentItemId,
+                                content_index: 0,
+                                audio_end_ms: audioEndMs
+                            }));
+                            console.log(`✂️  Truncated interrupted item ${session.currentItemId} at ${audioEndMs}ms for ${callId}`);
+                        }
+                        session.currentItemId = null;
+                        session.currentItemAudioStartTime = null;
+                        session.currentItemGeneratedMs = 0;
                     }
 
                     // Always clear the RTP audio queue to stop playback immediately
                     const callData = this.activeCalls.get(callId);
-                    if (callData && callData.externalMediaId) {
-                        this.emit('clear-audio-queue', callData.externalMediaId);
+                    if (callData && callData.externalMedia) {
+                        this.emit('clear-audio-queue', callData.externalMedia.id);
                     }
                 }
                 return;
@@ -524,7 +545,7 @@ export class ARIHandler extends EventEmitter {
                             type: 'realtime',
                             audio: {
                                 input: {
-                                    turn_detection: { type: 'semantic_vad' }
+                                    turn_detection: { type: 'semantic_vad', eagerness: 'medium' }
                                 }
                             }
                         }
@@ -567,6 +588,17 @@ export class ARIHandler extends EventEmitter {
                 const session = this.openAiSessions.get(callId);
                 if (session) {
                     session.hasActiveResponse = true;
+
+                    // Track which item is currently playing and how much audio has
+                    // been generated for it, so we can truncate it correctly if the
+                    // caller interrupts (see conversation.item.truncate below).
+                    if (session.currentItemId !== message.item_id) {
+                        session.currentItemId = message.item_id;
+                        session.currentItemAudioStartTime = Date.now();
+                        session.currentItemGeneratedMs = 0;
+                    }
+                    // g711 u-law @ 8kHz = 8 bytes per ms of audio
+                    session.currentItemGeneratedMs += Buffer.from(message.delta, 'base64').length / 8;
                 }
                 if (!this._audioDeltaLogged) {
                     this._audioDeltaLogged = true;

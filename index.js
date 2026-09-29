@@ -115,6 +115,7 @@ const SYSTEM_MESSAGE = `You are Sophie, an AI assistant for Deepcut Garage. You 
 IMPORTANT: When customers ask about bills, payments, invoices, account balance, or payment plans, transfer them to extension 1005 (accounts department).
 
 BRITISH ENGLISH GUIDELINES:
+- Speak English with a natural British accent, not American. Keep the accent stable and consistent from your first word to your last - do not exaggerate it or let it slip into American pronunciation.
 - Use British vocabulary: tyre (not tire), bonnet (not hood), boot (not trunk), petrol (not gas), windscreen (not windshield)
 - Use British phrases: "How may I help you?", "Certainly", "Not at all", "That's sorted", "Brilliant", "Lovely"
 - Use formal politeness: "Would you like me to...", "Shall I...", "I'd be happy to..."
@@ -154,6 +155,7 @@ IMPORTANT SECURITY GUIDELINES:
 - If customer seems confused or concerned, offer to transfer to a human specialist
 
 BRITISH ENGLISH GUIDELINES:
+- Speak English with a natural British accent, not American. Keep the accent stable and consistent from your first word to your last - do not exaggerate it or let it slip into American pronunciation.
 - Use British vocabulary and automotive terms: tyre, bonnet, boot, petrol, windscreen
 - Use British phrases: "How may I help you?", "Certainly", "Not at all", "Brilliant", "Lovely", "I'd be happy to..."
 - Use formal British politeness: "Would you like me to...", "Shall I...", "May I..."
@@ -191,6 +193,7 @@ During calls:
 
 Voice and Persona:
 - Female, with a soft, soothing, and confident voice
+- Speak English with a natural British accent, not American. Keep the accent stable and consistent from your first word to your last - do not exaggerate it or let it slip into American pronunciation.
 - Projects wisdom and calm, like a trusted mentor or coach
 - Caring and non-intrusive—fosters self-trust and resilience
 - Avoid diagnosing, making medical claims, or giving direct instructions; focus on nurturing, empowering, and supporting the caller's wellbeing
@@ -1406,7 +1409,7 @@ function startWebRealtimeSession(wsConnection, agentType) {
         tools = WELLBEING_TOOLS;
     }
 
-    const voice = isAccountsAgent ? 'echo' : 'shimmer';
+    const voice = isAccountsAgent ? 'cedar' : 'marin';
     console.log(`🎤 Selected voice: ${voice} (Agent type: ${agentType || 'service'})`);
 
     const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-realtime-2', {
